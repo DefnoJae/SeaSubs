@@ -18,7 +18,7 @@ function init() {
         const API_KEY = "{{apiKey}}"
         const PREFER_FORCED = "{{preferForced}}" !== "false"
         const API = "https://api.opensubtitles.com/api/v1"
-        const UA = "SeaSubs v0.2.1"
+        const UA = "SeaSubs v0.3.0"
 
         let title = ""
         let episode = 0
@@ -80,6 +80,69 @@ function init() {
             return s
         }
 
+        function collectSubtitleAttachments(torrent: any): any[] {
+            const out: any[] = []
+            const seen: Record<string, boolean> = {}
+            const add = (items: any[]) => {
+                for (const attach of (items || [])) {
+                    if (attach?.type !== "subtitle") continue
+                    const key = String(attach.id || "") + "|" + String(attach.url || "")
+                    if (seen[key]) continue
+                    seen[key] = true
+                    out.push(attach)
+                }
+            }
+            add(torrent?.attachments || [])
+            for (const file of (torrent?.files || [])) add(file?.attachments || [])
+            return out
+        }
+
+        async function searchAnimeToshoHost(host: string, eid: number): Promise<AnimeToshoResult[]> {
+            const feedUrl = host.indexOf(".xyz") >= 0
+                ? "https://feed.animetosho.xyz/feed/json?eid=" + eid
+                : "https://feed.animetosho.org/json?eid=" + eid
+            const detailBase = host.indexOf(".xyz") >= 0
+                ? "https://feed.animetosho.xyz/json?show=torrent&id="
+                : "https://feed.animetosho.org/json?show=torrent&id="
+            const feed = await ctx.fetch(feedUrl)
+            if (!feed.ok) return []
+            const entries = feed.json() as any[]
+            const candidates = (Array.isArray(entries) ? entries : [])
+                .filter((e: any) => !e.status || e.status === "complete")
+                .slice(0, 12)
+            const details = await Promise.all(candidates.map(async (entry: any) => {
+                try {
+                    const r = await ctx.fetch(detailBase + entry.id)
+                    if (!r.ok) return null
+                    return { torrent: r.json() as any, entry }
+                } catch (_) { return null }
+            }))
+            const out: AnimeToshoResult[] = []
+            for (const item of details) {
+                if (!item) continue
+                const torrent = item.torrent
+                const release = String(torrent?.title || torrent?.torrent_name || item.entry?.title || "")
+                for (const attach of collectSubtitleAttachments(torrent)) {
+                    const info = attach?.info || {}
+                    const lang = String(info.lang || info.language_code || info.language || "").toLowerCase()
+                    const name = String(info.name || info.title || info.language || "")
+                    const forced = info.forced === true
+                    const isEnglish = /^(eng|en|english)$/.test(lang) || /english|\\beng\\b/i.test(lang + " " + name)
+                    const s = animeToshoScore(name, release) + (forced ? 1200 : 0)
+                    if (!isEnglish || s < 500) continue
+                    const rawType = String(info.codec || info.format || "ass").toLowerCase()
+                    const type = rawType.indexOf("ssa") >= 0 ? "ssa" : rawType.indexOf("srt") >= 0 ? "srt" : rawType.indexOf("vtt") >= 0 ? "vtt" : "ass"
+                    const url = String(attach.url || (attach.id ? "https://sub.wyzie.io/c/animetosho/id/" + attach.id + ".animetosho?format=" + encodeURIComponent(type) : ""))
+                    if (!url) continue
+                    out.push({
+                        label: (forced ? "★ Forced — " : "★ ") + (name || "English Signs & Songs") + " — " + release,
+                        url, type, language: "en", score: s,
+                    })
+                }
+            }
+            return out
+        }
+
         async function searchAnimeTosho(): Promise<AnimeToshoResult[]> {
             if (!mediaId || !episode) return []
             try {
@@ -87,42 +150,18 @@ function init() {
                 const epMeta = metadata?.episodes?.[String(episode)]
                 const eid = Number(epMeta?.anidbId || 0)
                 if (!eid) return []
-                const feed = await ctx.fetch("https://feed.animetosho.org/json?eid=" + eid)
-                if (!feed.ok) return []
-                const entries = feed.json() as any[]
+                const sources = await Promise.all([
+                    searchAnimeToshoHost("animetosho.xyz", eid),
+                    searchAnimeToshoHost("animetosho.org", eid),
+                ])
+                const seen: Record<string, boolean> = {}
                 const out: AnimeToshoResult[] = []
-                const candidates = Array.isArray(entries) ? entries.slice(0, 10) : []
-                const torrents = await Promise.all(candidates.map(async (entry: any) => {
-                    try {
-                        const detail = await ctx.fetch("https://feed.animetosho.org/json?show=torrent&id=" + entry.id)
-                        if (!detail.ok) return null
-                        return { torrent: detail.json() as any, entry }
-                    } catch (_) {
-                        return null
-                    }
-                }))
-                for (const item of torrents) {
-                    if (!item) continue
-                    const torrent = item.torrent
-                    const entry = item.entry
-                    for (const file of (torrent?.files || [])) {
-                        for (const attach of (file?.attachments || [])) {
-                            if (attach?.type !== "subtitle") continue
-                            const lang = String(attach.info?.lang || "").toLowerCase()
-                            const name = String(attach.info?.name || "")
-                            const release = String(torrent.title || entry.title || "")
-                            const s = animeToshoScore(name, release)
-                            const isEnglish = /^(eng|en|english)$/.test(lang) || /\\beng(?:lish)?\\b/i.test(name)
-                            if (!isEnglish || s < 500) continue
-                            const type = String(attach.info?.codec || "ass").toLowerCase()
-                            out.push({
-                                label: "★ " + (name || "English Signs & Songs") + " — " + release,
-                                url: "https://sub.wyzie.io/c/animetosho/id/" + attach.id + ".animetosho?format=" + encodeURIComponent(type),
-                                type,
-                                language: "en",
-                                score: s,
-                            })
-                        }
+                for (const list of sources) {
+                    for (const item of list) {
+                        const key = item.url + "|" + item.label
+                        if (seen[key]) continue
+                        seen[key] = true
+                        out.push(item)
                     }
                 }
                 out.sort((a, b) => b.score - a.score)
