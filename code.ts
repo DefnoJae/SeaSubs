@@ -18,7 +18,7 @@ function init() {
         const API_KEY = "{{apiKey}}"
         const PREFER_FORCED = "{{preferForced}}" !== "false"
         const API = "https://api.opensubtitles.com/api/v1"
-        const UA = "SeaSubs v0.4.0"
+        const UA = "SeaSubs v0.5.0"
 
         let title = ""
         let episode = 0
@@ -26,6 +26,7 @@ function init() {
         let baseUrl = API
         let results: OSResult[] = []
         let mediaId = 0
+        let dubbed = false
 
         const tray = ctx.newTray({ withContent: true })
         const palette = ctx.newCommandPalette({
@@ -144,10 +145,12 @@ function init() {
                             label: (forced ? "★ Forced — " : "★ ") + (name || "English Signs & Songs") + " — " + release,
                             url, fallbackUrl: originalUrl || undefined, type, language: "en", score: directScore, mode: "direct",
                         })
-                    } else if (type === "ass" || type === "ssa") {
+                    } else if ((type === "ass" || type === "ssa") && /\.(?:ass|ssa)(?:[?#]|$)/i.test(originalUrl)) {
+                        // Only offer generation when AnimeTosho exposes an actual plaintext ASS/SSA URL.
+                        // Raw .xz attachments cannot be decoded by the Seanime plugin runtime.
                         out.push({
                             label: "Generate Signs & Songs — " + (name || "English ASS") + " — " + release,
-                            url, fallbackUrl: originalUrl || undefined, type, language: "en", score: 100, mode: "derive",
+                            url: originalUrl, type, language: "en", score: 100, mode: "derive",
                         })
                     }
                 }
@@ -321,6 +324,125 @@ function init() {
             palette.close()
         }
 
+        async function animeyaRpc(method: string, input: any): Promise<any> {
+            const url = "https://animeya.cc/api/trpc/" + method + "?input=" + encodeURIComponent(JSON.stringify({ json: input }))
+            const r = await ctx.fetch(url, {
+                headers: { "Referer": "https://animeya.cc/", "User-Agent": "Mozilla/5.0" },
+                timeout: 20,
+            })
+            if (!r.ok) throw new Error("Animeya HTTP " + r.status)
+            const body = r.json() as any
+            if (body?.error) throw new Error(body.error?.json?.message || body.error?.message || "Animeya API error")
+            return body?.result?.data?.json
+        }
+
+        function animeyaDecodeCipher(body: any): any {
+            if (!body?.encrypted) return body
+            if (typeof body.data !== "string") throw new Error("Animeya encrypted response changed")
+            const alphabet = "RB0fpH8ZEyVLkv7c2i6MAJ5u3IKFDxlS1NTsnGaqmXYdUrtzjwObCgQP94hoeW+/="
+            const bytes: number[] = []
+            for (let i = 0; i < body.data.length; i += 4) {
+                const a = alphabet.indexOf(body.data[i]), b = alphabet.indexOf(body.data[i + 1])
+                const cc = alphabet.indexOf(body.data[i + 2]), d = alphabet.indexOf(body.data[i + 3])
+                if (a < 0 || b < 0 || cc < 0 || d < 0) throw new Error("Invalid Animeya encoding")
+                bytes.push((a << 2) | (b >> 4))
+                if (cc !== 64) bytes.push(((b & 15) << 4) | (cc >> 2))
+                if (d !== 64) bytes.push(((cc & 3) << 6) | d)
+            }
+            const text = decodeURIComponent(bytes.map(b => "%" + ("0" + b.toString(16)).slice(-2)).join(""))
+            return JSON.parse(text)
+        }
+
+        function absoluteUrl(url: string, base: string): string {
+            if (!url) return ""
+            if (/^https?:\/\//i.test(url)) return url
+            if (url.startsWith("//")) return "https:" + url
+            const origin = base.match(/^https?:\/\/[^/]+/i)?.[0] || ""
+            if (url.startsWith("/")) return origin + url
+            return base.slice(0, base.lastIndexOf("/") + 1) + url
+        }
+
+        async function searchAnimeyaForced(): Promise<AnimeToshoResult[]> {
+            if (!mediaId || !episode) return []
+            try {
+                const search = await animeyaRpc("media.getMediasWithPaginationAndFilters", {
+                    page: 1,
+                    pageSize: 50,
+                    skipInitialData: true,
+                    filters: { search: title, type: "ANIME" },
+                    keys: ["id", "idAnilist", "slug", "title", "episodes", "seasonYear", "sub", "dub"],
+                })
+                const media = (search?.medias || []).find((x: any) => Number(x?.idAnilist) === mediaId) || (search?.medias || [])[0]
+                if (!media?.slug) return []
+
+                let episodeId = 0
+                for (let page = 1; page <= 5 && !episodeId; page++) {
+                    const eps = await animeyaRpc("episode.getAllEpisodesByMediaSlugWithPagination", {
+                        slug: media.slug, page, pageSize: 100,
+                    })
+                    for (const ep of (eps?.eps || [])) {
+                        if (Number(ep?.episodeNumber) === episode) {
+                            episodeId = Number(ep.id)
+                            break
+                        }
+                    }
+                    if (page * 100 >= Number(eps?.epsCount || 0)) break
+                }
+                if (!episodeId) return []
+
+                const full = await animeyaRpc("episode.getEpisodeFullById", episodeId)
+                const players = (full?.players || []).filter((p: any) => {
+                    if (p?.langue !== "ENG") return false
+                    return dubbed ? p?.subType === "NONE" : p?.subType !== "NONE"
+                })
+
+                const found: AnimeToshoResult[] = []
+                const seen: Record<string, boolean> = {}
+                for (const player of players.slice(0, 6)) {
+                    const match = String(player?.url || "").match(/^https:\/\/vidnest\.fun\/(anime|animepahe)\/(\d+)\/(\d+)\/(sub|dub)(?:[/?#]|$)/i)
+                    if (!match) continue
+                    for (const backend of ["anitaku", "aniwave", "megaplay"]) {
+                        try {
+                            const route = backend === "anitaku" ? "hianime/anime/" : backend === "aniwave" ? "aniwave_hls/" : "animehub/"
+                            const suffix = backend === "anitaku" ? "/hd-2" : ""
+                            const api = "https://new.vidnest.fun/" + route + match[2] + "/" + match[3] + "/" + match[4] + suffix
+                            const rr = await ctx.fetch(api, {
+                                headers: { "Referer": String(player.url), "User-Agent": "Mozilla/5.0" },
+                                timeout: 20,
+                            })
+                            if (!rr.ok) continue
+                            const data = animeyaDecodeCipher(rr.json() as any)
+                            const tracks = ([] as any[]).concat(data?.subtitles || [], data?.tracks || [])
+                            for (const source of (data?.sources || data?.multiSrc || [])) {
+                                tracks.push(...(source?.subtitles || []), ...(source?.tracks || []))
+                            }
+                            for (const track of tracks) {
+                                if (track?.kind && !["captions", "subtitles"].includes(track.kind)) continue
+                                const label = String(track?.label || track?.language || track?.lang || "")
+                                const forced = track?.forced === true || /forced|signs?|songs?/i.test(label)
+                                if (!forced) continue
+                                const english = /english|\beng\b|^en$/i.test(label) || !label
+                                if (!english) continue
+                                const url = absoluteUrl(String(track?.url || track?.file || ""), String(player.url))
+                                if (!url || seen[url]) continue
+                                seen[url] = true
+                                const type = /\.ass(?:[?#]|$)/i.test(url) ? "ass" : /\.ssa(?:[?#]|$)/i.test(url) ? "ssa" : /\.srt(?:[?#]|$)/i.test(url) ? "srt" : "vtt"
+                                found.push({
+                                    label: "★ Animeya — " + (label || "English Forced / Signs & Songs"),
+                                    url, type, language: "en", score: 3000, mode: "direct",
+                                })
+                            }
+                            if (found.length) return found
+                        } catch (_) {}
+                    }
+                }
+                return found
+            } catch (err) {
+                console.log("SeaSubs Animeya fallback failed", err)
+                return []
+            }
+        }
+
         async function search(): Promise<void> {
             syncFromVideoCore()
             if (!title || !episode) {
@@ -328,6 +450,19 @@ function init() {
                 return
             }
             ctx.toast.info("SeaSubs: searching Signs & Songs for " + title + " E" + episode + "…")
+
+            const animeya = await searchAnimeyaForced()
+            if (animeya.length) {
+                palette.setItems(animeya.map((item, index) => ({
+                    label: item.label,
+                    value: "animeya-" + String(index),
+                    heading: index === 0 ? "Animeya — Forced / Signs & Songs" : undefined,
+                    onSelect: () => injectExternal(item.url, item.label, item.language, item.type),
+                })))
+                palette.open()
+                return
+            }
+
             const animeTosho = await searchAnimeTosho()
             if (animeTosho.length) {
                 const direct = animeTosho.filter(x => x.mode === "direct")
@@ -337,7 +472,7 @@ function init() {
                     label: item.label,
                     value: "at-" + String(index),
                     heading: index === 0
-                        ? (direct.length ? "Forced / Signs & Songs matches" : "Generate from full English ASS")
+                        ? (direct.length ? "AnimeTosho — Forced / Signs & Songs" : "Generate from readable English ASS")
                         : undefined,
                     onSelect: () => item.mode === "derive"
                         ? void deriveAndInject(item)
@@ -347,7 +482,7 @@ function init() {
                 return
             }
             if (!API_KEY) {
-                ctx.toast.warning("SeaSubs: no Forced track or usable full English ASS was found for this episode.")
+                ctx.toast.warning("SeaSubs: no Forced / Signs & Songs track was found from Animeya or AnimeTosho for this episode.")
                 return
             }
             ctx.toast.info("SeaSubs: trying OpenSubtitles fallback…")
@@ -435,6 +570,7 @@ function init() {
         function syncFromVideoCore(): void {
             const info = ctx.videoCore.getCurrentPlaybackInfo()
             const media = ctx.videoCore.getCurrentMedia()
+            dubbed = Boolean(info?.onlinestreamParams?.dubbed)
             if (media?.id) mediaId = Number(media.id)
             if (media?.title?.userPreferred) title = media.title.userPreferred
             else if (media?.title?.english) title = media.title.english
