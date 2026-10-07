@@ -25,6 +25,7 @@ function init() {
         let token = ""
         let baseUrl = API
         let results: OSResult[] = []
+        let mediaId = 0
 
         const tray = ctx.newTray({ withContent: true })
         const palette = ctx.newCommandPalette({
@@ -62,17 +63,96 @@ function init() {
             return (forced ? "★ " : "") + file
         }
 
+        type AnimeToshoResult = {
+            label: string
+            url: string
+            type: string
+            language: string
+            score: number
+        }
+
+        function animeToshoScore(name: string, release: string): number {
+            const text = (name + " " + release).toLowerCase()
+            let s = 0
+            if (/signs?[ ._\\/-]*(and|&)?[ ._\\/-]*songs?|forced|songs?[ ._\\/-]*(and|&)?[ ._\\/-]*signs?/.test(text)) s += 1000
+            if (/\\beng(?:lish)?\\b/.test(text)) s += 200
+            if (/sdh|hearing[ ._-]*impaired|closed[ ._-]*captions?|\\bcc\\b/.test(text)) s -= 200
+            return s
+        }
+
+        async function searchAnimeTosho(): Promise<AnimeToshoResult[]> {
+            if (!mediaId || !episode) return []
+            try {
+                const metadata = await ctx.anime.getAnimeMetadata("anilist", mediaId)
+                const epMeta = metadata?.episodes?.[String(episode)]
+                const eid = Number(epMeta?.anidbId || 0)
+                if (!eid) return []
+                const feed = await ctx.fetch("https://feed.animetosho.org/json?eid=" + eid)
+                if (!feed.ok) return []
+                const entries = feed.json() as any[]
+                const out: AnimeToshoResult[] = []
+                for (const entry of (Array.isArray(entries) ? entries.slice(0, 12) : [])) {
+                    const detail = await ctx.fetch("https://feed.animetosho.org/json?show=torrent&id=" + entry.id)
+                    if (!detail.ok) continue
+                    const torrent = detail.json() as any
+                    for (const file of (torrent?.files || [])) {
+                        for (const attach of (file?.attachments || [])) {
+                            if (attach?.type !== "subtitle") continue
+                            const lang = String(attach.info?.lang || "").toLowerCase()
+                            const name = String(attach.info?.name || "")
+                            const release = String(torrent.title || entry.title || "")
+                            const s = animeToshoScore(name, release)
+                            const isEnglish = /^(eng|en|english)$/.test(lang) || /\\beng(?:lish)?\\b/i.test(name)
+                            if (!isEnglish || s < 500) continue
+                            const type = String(attach.info?.codec || "ass").toLowerCase()
+                            out.push({
+                                label: "★ " + (name || "English Signs & Songs") + " — " + release,
+                                url: "https://sub.wyzie.io/c/animetosho/id/" + attach.id + ".animetosho?format=" + encodeURIComponent(type),
+                                type,
+                                language: "en",
+                                score: s,
+                            })
+                        }
+                    }
+                }
+                out.sort((a, b) => b.score - a.score)
+                return out
+            } catch (err) {
+                console.log("SeaSubs AnimeTosho search failed", err)
+                return []
+            }
+        }
+
+        function injectExternal(src: string, label: string, language: string, type: string): void {
+            ctx.videoCore.addExternalSubtitleTrack({ src, label: "SeaSubs — " + label, language, type, default: true })
+            ctx.videoCore.showMessage("SeaSubs loaded: " + label, 2500)
+            ctx.toast.success("SeaSubs: external subtitle added to the player.")
+            palette.close()
+        }
+
         async function search(): Promise<void> {
             syncFromVideoCore()
             if (!title || !episode) {
                 ctx.toast.warning("SeaSubs: start an episode first so I know what to search for.")
                 return
             }
-            if (!API_KEY) {
-                ctx.toast.warning("SeaSubs: no subtitle source is configured yet. OpenSubtitles is optional; add an API key if you want to use it.")
+            ctx.toast.info("SeaSubs: searching Signs & Songs for " + title + " E" + episode + "…")
+            const animeTosho = await searchAnimeTosho()
+            if (animeTosho.length) {
+                palette.setItems(animeTosho.slice(0, 25).map((item, index) => ({
+                    label: item.label,
+                    value: "at-" + String(index),
+                    heading: index === 0 ? "AnimeTosho — Forced / Signs & Songs" : undefined,
+                    onSelect: () => injectExternal(item.url, item.label, item.language, item.type),
+                })))
+                palette.open()
                 return
             }
-            ctx.toast.info("SeaSubs: searching English subtitles for " + title + " E" + episode + "…")
+            if (!API_KEY) {
+                ctx.toast.warning("SeaSubs: no Forced / Signs & Songs track was found on AnimeTosho for this episode.")
+                return
+            }
+            ctx.toast.info("SeaSubs: trying OpenSubtitles fallback…")
             const q = encodeURIComponent(title)
             const url = API + "/subtitles?languages=en&query=" + q + "&episode_number=" + episode + "&order_by=download_count&order_direction=desc"
             const r = await ctx.fetch(url, { headers: headers(false) })
@@ -157,6 +237,7 @@ function init() {
         function syncFromVideoCore(): void {
             const info = ctx.videoCore.getCurrentPlaybackInfo()
             const media = ctx.videoCore.getCurrentMedia()
+            if (media?.id) mediaId = Number(media.id)
             if (media?.title?.userPreferred) title = media.title.userPreferred
             else if (media?.title?.english) title = media.title.english
             else if (media?.title?.romaji) title = media.title.romaji
