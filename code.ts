@@ -194,6 +194,133 @@ function init() {
             palette.close()
         }
 
+        function splitAssFields(payload: string, count: number): string[] {
+            const out: string[] = []
+            let start = 0
+            for (let i = 0; i < count - 1; i++) {
+                const p = payload.indexOf(",", start)
+                if (p < 0) {
+                    out.push(payload.slice(start))
+                    while (out.length < count) out.push("")
+                    return out
+                }
+                out.push(payload.slice(start, p))
+                start = p + 1
+            }
+            out.push(payload.slice(start))
+            return out
+        }
+
+        function stripAssTags(text: string): string {
+            return text
+                .replace(/\{[^}]*\}/g, "")
+                .replace(/\\N|\\n/g, " ")
+                .replace(/\\h/g, " ")
+                .trim()
+        }
+
+        function looksLikeSignsOrSongs(style: string, name: string, effect: string, text: string): boolean {
+            const meta = (style + " " + name + " " + effect).toLowerCase()
+            if (/signs?|songs?|lyrics?|karaoke|opening|ending|\bop\b|\bed\b|insert|typeset|screen|title|note/.test(meta)) return true
+            if (/\\k(?:f|o)?\d+/i.test(text)) return true
+
+            // Some releases use a generic style for on-screen text but position/typeset it heavily.
+            const plain = stripAssTags(text)
+            const positioned = /\\(?:pos|move)\s*\(/i.test(text)
+            const typeset = /\\(?:fn|fs|bord|shad|frx|fry|frz|fax|fay|c&H|1c&H|3c&H)/i.test(text)
+            if (positioned && typeset && plain.length > 0 && plain.length <= 100) return true
+            return false
+        }
+
+        function deriveSignsSongsAss(input: string): { content: string, count: number } {
+            const normalized = input.replace(/\r\n/g, "\n").replace(/\r/g, "\n")
+            const lines = normalized.split("\n")
+            let inEvents = false
+            let eventFormat: string[] = []
+            let kept = 0
+            const output: string[] = []
+
+            for (const line of lines) {
+                const trimmed = line.trim()
+                if (/^\[Events\]$/i.test(trimmed)) {
+                    inEvents = true
+                    output.push(line)
+                    continue
+                }
+                if (/^\[[^\]]+\]$/.test(trimmed) && !/^\[Events\]$/i.test(trimmed)) {
+                    inEvents = false
+                    output.push(line)
+                    continue
+                }
+                if (!inEvents) {
+                    output.push(line)
+                    continue
+                }
+                if (/^Format\s*:/i.test(trimmed)) {
+                    eventFormat = trimmed.slice(trimmed.indexOf(":") + 1).split(",").map(x => x.trim().toLowerCase())
+                    output.push(line)
+                    continue
+                }
+                if (!/^(Dialogue|Comment)\s*:/i.test(trimmed)) {
+                    output.push(line)
+                    continue
+                }
+
+                const colon = line.indexOf(":")
+                const kind = line.slice(0, colon + 1)
+                const payload = line.slice(colon + 1)
+                const format = eventFormat.length ? eventFormat : ["layer","start","end","style","name","marginl","marginr","marginv","effect","text"]
+                const fields = splitAssFields(payload, format.length)
+                const get = (key: string) => {
+                    const i = format.indexOf(key)
+                    return i >= 0 ? String(fields[i] || "") : ""
+                }
+                if (looksLikeSignsOrSongs(get("style"), get("name"), get("effect"), get("text"))) {
+                    output.push(kind + fields.join(","))
+                    kept++
+                }
+            }
+            return { content: output.join("\r\n"), count: kept }
+        }
+
+        async function fetchSubtitleText(item: AnimeToshoResult): Promise<string> {
+            const urls = [item.url]
+            if (item.fallbackUrl && item.fallbackUrl !== item.url) urls.push(item.fallbackUrl)
+            for (const url of urls) {
+                try {
+                    const r = await ctx.fetch(url)
+                    if (!r.ok) continue
+                    const text = r.text()
+                    if (/\[Script Info\]/i.test(text) && /\[Events\]/i.test(text)) return text
+                } catch (_) {}
+            }
+            return ""
+        }
+
+        async function deriveAndInject(item: AnimeToshoResult): Promise<void> {
+            ctx.toast.info("SeaSubs: generating a Signs & Songs track…")
+            const full = await fetchSubtitleText(item)
+            if (!full) {
+                ctx.toast.error("SeaSubs: couldn't read this ASS/SSA subtitle as text.")
+                return
+            }
+            const derived = deriveSignsSongsAss(full)
+            if (!derived.count) {
+                ctx.toast.warning("SeaSubs: this full subtitle had no recognizable Signs / Songs events.")
+                return
+            }
+            ctx.videoCore.addExternalSubtitleTrack({
+                content: derived.content,
+                label: "SeaSubs — Generated Signs & Songs (" + derived.count + " events)",
+                language: "en",
+                type: item.type === "ssa" ? "ssa" : "ass",
+                default: true,
+            })
+            ctx.videoCore.showMessage("SeaSubs generated Signs & Songs", 2500)
+            ctx.toast.success("SeaSubs: generated " + derived.count + " Signs / Songs events.")
+            palette.close()
+        }
+
         async function search(): Promise<void> {
             syncFromVideoCore()
             if (!title || !episode) {
@@ -203,17 +330,24 @@ function init() {
             ctx.toast.info("SeaSubs: searching Signs & Songs for " + title + " E" + episode + "…")
             const animeTosho = await searchAnimeTosho()
             if (animeTosho.length) {
-                palette.setItems(animeTosho.slice(0, 25).map((item, index) => ({
+                const direct = animeTosho.filter(x => x.mode === "direct")
+                const derived = animeTosho.filter(x => x.mode === "derive")
+                const choices = direct.length ? direct.concat(derived.slice(0, 8)) : derived.slice(0, 12)
+                palette.setItems(choices.map((item, index) => ({
                     label: item.label,
                     value: "at-" + String(index),
-                    heading: index === 0 ? "AnimeTosho — Forced / Signs & Songs" : undefined,
-                    onSelect: () => injectExternal(item.url, item.label, item.language, item.type),
+                    heading: index === 0
+                        ? (direct.length ? "Forced / Signs & Songs matches" : "Generate from full English ASS")
+                        : undefined,
+                    onSelect: () => item.mode === "derive"
+                        ? void deriveAndInject(item)
+                        : injectExternal(item.url, item.label, item.language, item.type),
                 })))
                 palette.open()
                 return
             }
             if (!API_KEY) {
-                ctx.toast.warning("SeaSubs: no separate Forced / Signs & Songs attachment was found for this episode.")
+                ctx.toast.warning("SeaSubs: no Forced track or usable full English ASS was found for this episode.")
                 return
             }
             ctx.toast.info("SeaSubs: trying OpenSubtitles fallback…")
