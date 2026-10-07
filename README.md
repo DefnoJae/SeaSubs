@@ -2,6 +2,11 @@
 
 Seanime plugin for external English Forced / Signs & Songs subtitles. Adds only subtitle tracks through VideoCore; preserves your current video provider, quality and audio.
 
+## v0.7.1 logo and result cursor
+
+- Adds the supplied SeaSubs logo to the extension marketplace metadata and tray button.
+- Shows the pointer cursor across SeaSubs subtitle result rows, including newly opened and filtered results.
+
 ## v0.7.0 faster search and episode following
 
 - Tries the original AnimeTosho source first, checking the most likely dub/remembered release before expanding the search. Returns the first readable signs track without waiting for Animeya, a slow alternate host, or unrelated downloads. Falls back to wider release checks, AnimeTosho.xyz and then current-provider/Animeya content when needed.

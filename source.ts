@@ -72,7 +72,7 @@ function init() {
         const API_KEY = "{{apiKey}}"
         const PREFER_FORCED = String("{{preferForced}}") !== "false"
         const API = "https://api.opensubtitles.com/api/v1"
-        const UA = "SeaSubs v0.7.0"
+        const UA = "SeaSubs v0.7.1"
 
         let title = ""
         let episode = 0
@@ -150,7 +150,7 @@ function init() {
             }, 500)
         }
 
-        const tray = ctx.newTray({ withContent: true, iconUrl: "" })
+        const tray = ctx.newTray({ withContent: true, iconUrl: "https://raw.githubusercontent.com/DefnoJae/SeaSubs/main/icon.png" })
         const palette = ctx.newCommandPalette({
             placeholder: "SeaSubs — search Forced / Signs & Songs",
             keyboardShortcut: "mod+shift+s",
@@ -931,7 +931,17 @@ function init() {
             tray.update()
         })
 
-        ctx.dom.onReady(() => scheduleAuto())
+        ctx.dom.onReady(() => {
+            scheduleAuto()
+            // The palette is portaled and its rows are recreated when results change.
+            // Scope the observer to our input so other Seanime palettes keep their styles.
+            ctx.dom.observe('[cmdk-root]:has(input[placeholder="SeaSubs — search Forced / Signs & Songs"]) [cmdk-item]', rows => {
+                for (const row of rows) {
+                    // Styling triggers another DOM observation; avoid a feedback loop.
+                    if (!/(?:^|;)\s*cursor:\s*pointer\s*(?:;|$)/.test(row.attributes.style || "")) row.setStyle("cursor", "pointer")
+                }
+            })
+        })
         ctx.screen.onNavigate(() => syncFromVideoCore())
         ctx.screen.loadCurrent()
 
