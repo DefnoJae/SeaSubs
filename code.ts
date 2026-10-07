@@ -18,7 +18,7 @@ function init() {
         const API_KEY = "{{apiKey}}"
         const PREFER_FORCED = "{{preferForced}}" !== "false"
         const API = "https://api.opensubtitles.com/api/v1"
-        const UA = "SeaSubs v0.1.0"
+        const UA = "SeaSubs v0.2.1"
 
         let title = ""
         let episode = 0
@@ -91,10 +91,20 @@ function init() {
                 if (!feed.ok) return []
                 const entries = feed.json() as any[]
                 const out: AnimeToshoResult[] = []
-                for (const entry of (Array.isArray(entries) ? entries.slice(0, 12) : [])) {
-                    const detail = await ctx.fetch("https://feed.animetosho.org/json?show=torrent&id=" + entry.id)
-                    if (!detail.ok) continue
-                    const torrent = detail.json() as any
+                const candidates = Array.isArray(entries) ? entries.slice(0, 10) : []
+                const torrents = await Promise.all(candidates.map(async (entry: any) => {
+                    try {
+                        const detail = await ctx.fetch("https://feed.animetosho.org/json?show=torrent&id=" + entry.id)
+                        if (!detail.ok) return null
+                        return { torrent: detail.json() as any, entry }
+                    } catch (_) {
+                        return null
+                    }
+                }))
+                for (const item of torrents) {
+                    if (!item) continue
+                    const torrent = item.torrent
+                    const entry = item.entry
                     for (const file of (torrent?.files || [])) {
                         for (const attach of (file?.attachments || [])) {
                             if (attach?.type !== "subtitle") continue
@@ -149,7 +159,7 @@ function init() {
                 return
             }
             if (!API_KEY) {
-                ctx.toast.warning("SeaSubs: no Forced / Signs & Songs track was found on AnimeTosho for this episode.")
+                ctx.toast.warning("SeaSubs: no separate Forced / Signs & Songs attachment was found for this episode.")
                 return
             }
             ctx.toast.info("SeaSubs: trying OpenSubtitles fallback…")
