@@ -91,7 +91,7 @@ buffer/index.js:
         const API_KEY = "{{apiKey}}"
         const PREFER_FORCED = String("{{preferForced}}") !== "false"
         const API = "https://api.opensubtitles.com/api/v1"
-        const UA = "SeaSubs v0.7.1"
+        const UA = "SeaSubs v0.7.2"
 
         let title = ""
         let episode = 0

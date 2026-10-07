@@ -2,6 +2,10 @@
 
 Seanime plugin for external English Forced / Signs & Songs subtitles. Adds only subtitle tracks through VideoCore; preserves your current video provider, quality and audio.
 
+## v0.7.2 updated logo
+
+- Replaces the marketplace and tray icon with the supplied Glossy Chat Wave logo.
+
 ## v0.7.1 logo and result cursor
 
 - Adds the supplied SeaSubs logo to the extension marketplace metadata and tray button.
