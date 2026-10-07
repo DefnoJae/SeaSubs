@@ -18,7 +18,7 @@ function init() {
         const API_KEY = "{{apiKey}}"
         const PREFER_FORCED = "{{preferForced}}" !== "false"
         const API = "https://api.opensubtitles.com/api/v1"
-        const UA = "SeaSubs v0.3.0"
+        const UA = "SeaSubs v0.4.0"
 
         let title = ""
         let episode = 0
@@ -69,6 +69,8 @@ function init() {
             type: string
             language: string
             score: number
+            mode: "direct" | "derive"
+            fallbackUrl?: string
         }
 
         function animeToshoScore(name: string, release: string): number {
@@ -128,16 +130,26 @@ function init() {
                     const name = String(info.name || info.title || info.language || "")
                     const forced = info.forced === true
                     const isEnglish = /^(eng|en|english)$/.test(lang) || /english|\\beng\\b/i.test(lang + " " + name)
-                    const s = animeToshoScore(name, release) + (forced ? 1200 : 0)
-                    if (!isEnglish || s < 500) continue
+                    if (!isEnglish) continue
                     const rawType = String(info.codec || info.format || "ass").toLowerCase()
                     const type = rawType.indexOf("ssa") >= 0 ? "ssa" : rawType.indexOf("srt") >= 0 ? "srt" : rawType.indexOf("vtt") >= 0 ? "vtt" : "ass"
-                    const url = String(attach.url || (attach.id ? "https://sub.wyzie.io/c/animetosho/id/" + attach.id + ".animetosho?format=" + encodeURIComponent(type) : ""))
+                    const directScore = animeToshoScore(name, release) + (forced ? 1200 : 0)
+                    const converterUrl = attach.id ? "https://sub.wyzie.io/c/animetosho/id/" + attach.id + ".animetosho?format=" + encodeURIComponent(type) : ""
+                    const originalUrl = String(attach.url || "")
+                    const url = converterUrl || originalUrl
                     if (!url) continue
-                    out.push({
-                        label: (forced ? "★ Forced — " : "★ ") + (name || "English Signs & Songs") + " — " + release,
-                        url, type, language: "en", score: s,
-                    })
+
+                    if (directScore >= 500) {
+                        out.push({
+                            label: (forced ? "★ Forced — " : "★ ") + (name || "English Signs & Songs") + " — " + release,
+                            url, fallbackUrl: originalUrl || undefined, type, language: "en", score: directScore, mode: "direct",
+                        })
+                    } else if (type === "ass" || type === "ssa") {
+                        out.push({
+                            label: "Generate Signs & Songs — " + (name || "English ASS") + " — " + release,
+                            url, fallbackUrl: originalUrl || undefined, type, language: "en", score: 100, mode: "derive",
+                        })
+                    }
                 }
             }
             return out
@@ -164,7 +176,10 @@ function init() {
                         out.push(item)
                     }
                 }
-                out.sort((a, b) => b.score - a.score)
+                out.sort((a, b) => {
+                    if (a.mode !== b.mode) return a.mode === "direct" ? -1 : 1
+                    return b.score - a.score
+                })
                 return out
             } catch (err) {
                 console.log("SeaSubs AnimeTosho search failed", err)
