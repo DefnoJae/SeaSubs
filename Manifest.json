@@ -1,7 +1,7 @@
 {
   "id": "seasubs",
   "name": "SeaSubs",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "manifestURI": "https://raw.githubusercontent.com/DefnoJae/SeaSubs/main/Manifest.json",
   "language": "typescript",
   "type": "plugin",
@@ -25,8 +25,8 @@
       "scopes": ["storage","playback"],
       "allow": {
         "networkAccess": {
-          "allowedDomains": ["api.opensubtitles.com","*.opensubtitles.com"],
-          "reasoning": "SeaSubs searches OpenSubtitles and requests temporary subtitle download links."
+          "allowedDomains": ["feed.animetosho.org","sub.wyzie.io","api.opensubtitles.com","*.opensubtitles.com"],
+          "reasoning": "SeaSubs searches AnimeTosho for English Forced / Signs & Songs subtitle attachments and can optionally use OpenSubtitles as a fallback."
         }
       }
     }
