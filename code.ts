@@ -18,7 +18,7 @@ function init() {
         const API_KEY = "{{apiKey}}"
         const PREFER_FORCED = "{{preferForced}}" !== "false"
         const API = "https://api.opensubtitles.com/api/v1"
-        const UA = "SeaSubs v0.5.2"
+        const UA = "SeaSubs v0.5.3"
 
         let title = ""
         let episode = 0
@@ -399,14 +399,27 @@ function init() {
                 if (!episodeId) return []
 
                 const full = await animeyaRpc("episode.getEpisodeFullById", episodeId)
-                const players = (full?.players || []).filter((p: any) => {
-                    if (p?.langue !== "ENG") return false
-                    return dubbed ? p?.subType === "NONE" : p?.subType !== "NONE"
-                })
+                // SeaSubs only needs the subtitle track, not Animeya's video.
+                // When the current Seanime stream is dubbed we must still inspect Animeya's
+                // softsub players, because Signs & Songs tracks often live there rather than
+                // on the dub player itself.
+                const players = (full?.players || [])
+                    .filter((p: any) => p?.langue === "ENG" && p?.subType !== "HARD")
+                    .sort((a: any, b: any) => {
+                        const rank = (p: any) => {
+                            const ai = /\bAI\b|auto.?translated|machine/i.test(String(p?.name || "") + " " + String(p?.subType || ""))
+                            if (ai) return 9
+                            if (dubbed && p?.subType === "NONE") return 0
+                            if (p?.subType === "SOFT") return 1
+                            if (!dubbed && p?.subType !== "NONE") return 2
+                            return 3
+                        }
+                        return rank(a) - rank(b)
+                    })
 
                 const found: AnimeToshoResult[] = []
                 const seen: Record<string, boolean> = {}
-                for (const player of players.slice(0, 6)) {
+                for (const player of players.slice(0, 10)) {
                     const match = String(player?.url || "").match(/^https:\/\/vidnest\.fun\/(anime|animepahe)\/(\d+)\/(\d+)\/(sub|dub)(?:[/?#]|$)/i)
                     if (!match) continue
                     for (const backend of ["anitaku", "aniwave", "megaplay"]) {
@@ -424,12 +437,22 @@ function init() {
                             for (const source of (data?.sources || data?.multiSrc || [])) {
                                 tracks.push(...(source?.subtitles || []), ...(source?.tracks || []))
                             }
+                            if (tracks.length) {
+                                console.log("SeaSubs Animeya tracks", {
+                                    backend,
+                                    player: String(player?.name || ""),
+                                    subType: String(player?.subType || ""),
+                                    mode: match[4],
+                                    labels: tracks.map((t: any) => String(t?.label || t?.language || t?.lang || t?.name || t?.title || "unlabelled")),
+                                })
+                            }
                             for (const track of tracks) {
                                 if (track?.kind && !["captions", "subtitles"].includes(track.kind)) continue
-                                const label = String(track?.label || track?.language || track?.lang || "")
-                                const forced = track?.forced === true || /forced|signs?|songs?/i.test(label)
+                                const label = String(track?.label || track?.language || track?.lang || track?.name || track?.title || "")
+                                const forcedFlag = track?.forced === true || track?.forced === 1 || String(track?.forced || "").toLowerCase() === "true"
+                                const forced = forcedFlag || /forced|signs?|songs?|foreign.?parts/i.test(label)
                                 if (!forced) continue
-                                const english = /english|\beng\b|^en$/i.test(label) || !label
+                                const english = /english|\beng\b|^en(?:[-_]|$)/i.test(label) || !label
                                 if (!english) continue
                                 const url = absoluteUrl(String(track?.url || track?.file || ""), String(player.url))
                                 if (!url || seen[url]) continue
