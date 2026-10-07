@@ -15,36 +15,42 @@ function harness(fetch) {
             getPlaybackState: () => ({playbackInfo:playback}), addExternalSubtitleTrack: t => injected.push(t), showMessage() {}, addEventListener() {} },
         playback:{ registerEventListener() {} }, dom:{ onReady() {} }, screen:{ onNavigate() {}, loadCurrent() {} },
         anime:{ getAnimeMetadata: async () => ({episodes:{4:{anidbId:271605}}}) }, registerEventHandler() {} };
-    const sandbox = {console: {log() {}}, $ui:{register: cb => cb(ctx)}};
-    vm.createContext(sandbox);
+    let callback;
+    const rootSandbox = { $ui:{register: cb => {callback = cb.toString()} } };
+    vm.createContext(rootSandbox);
     let code = fs.readFileSync(path.join(root,'code.ts'),'utf8');
     code = code.replace('ctx.registerEventHandler("seasubs-search",',
-        'globalThis.testHooks = {runSearch, searchAnimeToshoHost, deriveSignsSongsAss, inspectCandidates, syncFromVideoCore, showCandidates, playbackKey}; ctx.registerEventHandler("seasubs-search",');
-    vm.runInContext(ts.transpileModule(code, {compilerOptions:{target:ts.ScriptTarget.ES2018}}).outputText, sandbox);
-    sandbox.init(); sandbox.testHooks.syncFromVideoCore();
-    return { sandbox, hooks:sandbox.testHooks, palette, injected, messages, change:() => {playback = {...playback,id:'episode-b'};} };
+        'globalThis.testHooks = {SeaSubsXZ, parseVtt, inferDubCompanion, deriveVtt, currentCandidates, runSearch, searchAnimeToshoHost, deriveSignsSongsAss, inspectCandidates, syncFromVideoCore, showCandidates, playbackKey}; ctx.registerEventHandler("seasubs-search",');
+    vm.runInContext(ts.transpileModule(code, {compilerOptions:{target:ts.ScriptTarget.ES2018}}).outputText, rootSandbox);
+    rootSandbox.init();
+    // Seanime serializes the callback and evaluates it in a separate UI VM.
+    const sandbox = {console:{log() {}}, __ctx:ctx}; vm.createContext(sandbox);
+    vm.runInContext('(' + callback + ').call(undefined, __ctx)', sandbox);
+    sandbox.testHooks.syncFromVideoCore();
+    return { sandbox, hooks:sandbox.testHooks, palette, injected, messages,
+        setTracks:tracks => {playback.subtitleTracks = tracks}, change:() => {playback = {...playback,id:'episode-b'};} };
 }
 const response = text => ({ok:true,status:200,text:() => text,json:() => JSON.parse(text)});
 const stamp = n => new Date(n * 1000).toISOString().slice(11,23);
 const vtt = cues => 'WEBVTT\n\n' + cues.map((c,i) => `${i}\n${stamp(c.start)} --> ${stamp(c.end)}\n${c.text}`).join('\n\n');
 test('decoder runs without Node/browser globals and verifies checksums', () => {
-    const {sandbox} = harness();
+    const {sandbox,hooks} = harness();
     const bytes = Uint8Array.from(Buffer.from(encoded,'base64'));
-    assert.match(sandbox.SeaSubsXZ.decode(bytes), /TEST SIGN/);
+    assert.match(hooks.SeaSubsXZ.decode(bytes), /TEST SIGN/);
     const bad = bytes.slice(); bad[40] ^= 8;
-    assert.throws(() => sandbox.SeaSubsXZ.decode(bad));
-    assert.throws(() => sandbox.SeaSubsXZ.decode(bytes.slice(0,35)));
+    assert.throws(() => hooks.SeaSubsXZ.decode(bad));
+    assert.throws(() => hooks.SeaSubsXZ.decode(bytes.slice(0,35)));
     assert.equal(sandbox.Buffer,undefined); assert.equal(sandbox.require,undefined);
 });
 test('VTT parser supports settings, identifiers and multiline text; ignores notes', () => {
-    const {sandbox:s} = harness();
+    const {hooks:s} = harness();
     const text = '\uFEFFWEBVTT\n\nNOTE ignore --> text\n\ncue-id\n00:01.000 --> 00:03.000 align:start\nline 1\nline 2\n\n00:04.000 --> 00:03.000\nbad';
     const cues = s.parseVtt(text);
     assert.equal(cues.length,1); assert.equal(cues[0].text,'line 1\nline 2');
     assert.equal(s.parseVtt('<html>Error</html>').length,0);
 });
 test('sparsity requires full reference, matching timing/text and episode spread', () => {
-    const {sandbox:s} = harness();
+    const {hooks:s} = harness();
     const full = Array.from({length:200},(_,i) => ({start:i*7,end:i*7+2,text:'text '+i}));
     const dub = [full[5],full[60],full[120],full[190]];
     assert.equal(s.inferDubCompanion(dub,full),true);
@@ -54,7 +60,7 @@ test('sparsity requires full reference, matching timing/text and episode spread'
     assert.equal(s.inferDubCompanion(dub,[]),false);
 });
 test('VTT derivation retains semantic/song cues without treating uppercase dialogue as signs', () => {
-    const {sandbox:s} = harness();
+    const {hooks:s} = harness();
     const input = vtt([{start:1,end:3,text:'STOP SHOUTING!'}, {start:4,end:6,text:'<c.sign>SHOP</c>'}, {start:7,end:9,text:'♪ Test lyric ♪'}]);
     const d = s.deriveVtt(input); assert.equal(d.count,2); assert.doesNotMatch(d.content,/SHOUTING/);
 });
@@ -88,6 +94,19 @@ test('failed English fetch is a preview, never a verified forced track', async (
     const h = harness(async () => ({ok:false,status:403}));
     const results = await h.hooks.inspectCandidates([{label:'Animeya dub — English',url:'https://cdn/test.vtt',type:'vtt',sourceMode:'dub',score:0}]);
     assert.equal(results.length,1); assert.match(results[0].label,/unverified/); assert.ok(results[0].score < 2000);
+});
+
+test('current URI wrappers become primitive URLs; empty tracks are skipped', async () => {
+    const calls = [];
+    const h = harness(async url => {
+        assert.equal(typeof url,'string'); calls.push(url);
+        return response(vtt([{start:1,end:3,text:'TEST'}]));
+    });
+    h.setTracks([{label:'English',language:'en',uri:{toString:() => 'https://cdn.test/signs.vtt'},format:'vtt'},
+        {label:'English',language:'en'}]);
+    const items = await h.hooks.currentCandidates();
+    assert.deepEqual(calls,['https://cdn.test/signs.vtt']);
+    assert.equal(items.length,1); assert.match(items[0].content,/TEST/);
 });
 
 test('live captured episode responses survive blocked VTT and inject the real 20-event Signs ASS',

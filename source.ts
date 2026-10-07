@@ -15,64 +15,64 @@ type OSResult = {
 
 type VttCue = { start: number, end: number, text: string, block: string }
 
-// Parse cue blocks, not lines: identifiers/settings/multiline text are significant.
-function parseVtt(input: string): VttCue[] {
-    if (!/^\uFEFF?WEBVTT(?:\s|$)/.test(input)) return []
-    const cues: VttCue[] = []
-    const stamp = (s: string) => s.split(":").reduce((n, p) => n * 60 + Number(p), 0)
-    for (const block of input.replace(/^\uFEFF/, "").replace(/\r\n?/g, "\n").split(/\n\s*\n/)) {
-        if (/^(WEBVTT|NOTE|STYLE|REGION)(?:\s|$)/.test(block)) continue
-        const lines = block.split("\n")
-        const i = lines.findIndex(l => l.includes("-->"))
-        if (i < 0) continue
-        const m = lines[i].match(/^((?:\d{2,}:)?\d{2}:\d{2}\.\d{3})\s+-->\s+((?:\d{2,}:)?\d{2}:\d{2}\.\d{3})(?:\s.*)?$/)
-        if (!m) continue
-        const start = stamp(m[1]), end = stamp(m[2])
-        const text = lines.slice(i + 1).join("\n").trim()
-        if (end > start && text && end - start <= 180) cues.push({ start, end, text, block })
-    }
-    return cues
-}
-
-function cueText(text: string): string {
-    return text.replace(/<[^>]*>/g, "").replace(/&nbsp;/g, " ").replace(/&amp;/g, "&")
-        .replace(/\s+/g, " ").trim().toLowerCase()
-}
-
-function cueStats(cues: VttCue[]): { count: number, seconds: number, span: number } {
-    const sorted = cues.slice().sort((a, b) => a.start - b.start)
-    let seconds = 0, end = 0
-    for (const c of sorted) { seconds += Math.max(0, c.end - Math.max(end, c.start)); end = Math.max(end, c.end) }
-    return { count: cues.length, seconds: Math.round(seconds), span: Math.round(end) }
-}
-
-function inferDubCompanion(dub: VttCue[], full: VttCue[]): boolean {
-    const d = cueStats(dub), f = cueStats(full)
-    // Sparsity alone also describes truncated dialogue. Require a substantial full
-    // reference and matching text/timestamps spread across the episode.
-    if (d.count < 3 || f.count < 100 || d.count / f.count > 0.3 || d.seconds / f.seconds > 0.3) return false
-    const matched = dub.filter(c => full.some(s => cueText(c.text) === cueText(s.text)
-        && Math.abs(c.start - s.start) <= 1.5 && Math.abs(c.end - s.end) <= 2))
-    return matched.length / dub.length >= 0.85
-        && Math.max(...dub.map(c => c.end)) - Math.min(...dub.map(c => c.start)) >= f.span * 0.5
-}
-
-function deriveVtt(input: string): { content: string, count: number } {
-    // VTT has usually lost ASS styles. Only retain explicit semantic classes or
-    // musical-note markers; uppercase dialogue and top positioning are not proof.
-    const cues = parseVtt(input).filter(c => /<c\.(?:[^>]*\.)?(?:signs?|songs?|lyrics?|karaoke)(?:[.>])/i.test(c.text)
-        || /[♪♫]/.test(cueText(c.text)))
-    const metadata = input.replace(/^\uFEFF/, "").replace(/\r\n?/g, "\n").split(/\n\s*\n/)
-        .filter(b => /^(STYLE|REGION)(?:\s|$)/.test(b))
-    return { content: ["WEBVTT", ...metadata, ...cues.map(c => c.block)].join("\n\n") + "\n", count: cues.length }
-}
-
 function init() {
     $ui.register((ctx) => {
+        // Parse cue blocks, not lines: identifiers/settings/multiline text are significant.
+        function parseVtt(input: string): VttCue[] {
+            if (!/^\uFEFF?WEBVTT(?:\s|$)/.test(input)) return []
+            const cues: VttCue[] = []
+            const stamp = (s: string) => s.split(":").reduce((n, p) => n * 60 + Number(p), 0)
+            for (const block of input.replace(/^\uFEFF/, "").replace(/\r\n?/g, "\n").split(/\n\s*\n/)) {
+                if (/^(WEBVTT|NOTE|STYLE|REGION)(?:\s|$)/.test(block)) continue
+                const lines = block.split("\n")
+                const i = lines.findIndex(l => l.includes("-->"))
+                if (i < 0) continue
+                const m = lines[i].match(/^((?:\d{2,}:)?\d{2}:\d{2}\.\d{3})\s+-->\s+((?:\d{2,}:)?\d{2}:\d{2}\.\d{3})(?:\s.*)?$/)
+                if (!m) continue
+                const start = stamp(m[1]), end = stamp(m[2])
+                const text = lines.slice(i + 1).join("\n").trim()
+                if (end > start && text && end - start <= 180) cues.push({ start, end, text, block })
+            }
+            return cues
+        }
+
+        function cueText(text: string): string {
+            return text.replace(/<[^>]*>/g, "").replace(/&nbsp;/g, " ").replace(/&amp;/g, "&")
+                .replace(/\s+/g, " ").trim().toLowerCase()
+        }
+
+        function cueStats(cues: VttCue[]): { count: number, seconds: number, span: number } {
+            const sorted = cues.slice().sort((a, b) => a.start - b.start)
+            let seconds = 0, end = 0
+            for (const c of sorted) { seconds += Math.max(0, c.end - Math.max(end, c.start)); end = Math.max(end, c.end) }
+            return { count: cues.length, seconds: Math.round(seconds), span: Math.round(end) }
+        }
+
+        function inferDubCompanion(dub: VttCue[], full: VttCue[]): boolean {
+            const d = cueStats(dub), f = cueStats(full)
+            // Sparsity alone also describes truncated dialogue. Require a substantial full
+            // reference and matching text/timestamps spread across the episode.
+            if (d.count < 3 || f.count < 100 || d.count / f.count > 0.3 || d.seconds / f.seconds > 0.3) return false
+            const matched = dub.filter(c => full.some(s => cueText(c.text) === cueText(s.text)
+                && Math.abs(c.start - s.start) <= 1.5 && Math.abs(c.end - s.end) <= 2))
+            return matched.length / dub.length >= 0.85
+                && Math.max(...dub.map(c => c.end)) - Math.min(...dub.map(c => c.start)) >= f.span * 0.5
+        }
+
+        function deriveVtt(input: string): { content: string, count: number } {
+            // VTT has usually lost ASS styles. Only retain explicit semantic classes or
+            // musical-note markers; uppercase dialogue and top positioning are not proof.
+            const cues = parseVtt(input).filter(c => /<c\.(?:[^>]*\.)?(?:signs?|songs?|lyrics?|karaoke)(?:[.>])/i.test(c.text)
+                || /[♪♫]/.test(cueText(c.text)))
+            const metadata = input.replace(/^\uFEFF/, "").replace(/\r\n?/g, "\n").split(/\n\s*\n/)
+                .filter(b => /^(STYLE|REGION)(?:\s|$)/.test(b))
+            return { content: ["WEBVTT", ...metadata, ...cues.map(c => c.block)].join("\n\n") + "\n", count: cues.length }
+        }
+
         const API_KEY = "{{apiKey}}"
         const PREFER_FORCED = String("{{preferForced}}") !== "false"
         const API = "https://api.opensubtitles.com/api/v1"
-        const UA = "SeaSubs v0.6.0"
+        const UA = "SeaSubs v0.6.1"
 
         let title = ""
         let episode = 0
@@ -260,6 +260,10 @@ function init() {
 
         async function readCandidate(item: AnimeToshoResult): Promise<string> {
             if (item.content) return item.content
+            if (typeof item.url !== "string" || !/^https?:\/\//i.test(item.url)) {
+                console.log("SeaSubs subtitle skipped", { source: item.label, reason: "No readable subtitle URL/content" })
+                return ""
+            }
             try {
                 const r = await ctx.fetch(item.url, { timeout: 15,
                     headers: { "Referer": "https://vidnest.fun/", "User-Agent": "Mozilla/5.0" } })
@@ -308,7 +312,17 @@ function init() {
             for (const t of tracks) {
                 if (/^SeaSubs/.test(t.label || "")) continue
                 if (!/^(en|eng|english)(?:[-_]|$)/i.test(t.language || "") && !/english|\beng\b/i.test(t.label || "")) continue
-                items.push({ url: t.src || "", content: t.content, type: t.type || "vtt", language: "en", mode: "direct",
+                // Native Goja structs may expose *string wrappers rather than JS
+                // primitives. Modern playback uses uri/sourceUrl/format fields.
+                const raw = t as any
+                const value = (v: any) => v == null ? "" : String(v)
+                const url = value(raw.src) || value(raw.uri) || value(raw.sourceUrl)
+                const content = value(raw.content)
+                if (!url && !content) {
+                    console.log("SeaSubs current track skipped", { label: value(raw.label), reason: "No URL/content exposed" })
+                    continue
+                }
+                items.push({ url, content, type: value(raw.type) || value(raw.format) || "vtt", language: "en", mode: "direct",
                     label: "Current provider — " + (t.label || "English"), sourceMode: dubbed ? "dub" : "sub",
                     score: /forced|signs?|songs?/i.test(t.label || "") ? 3000 : 0 })
             }

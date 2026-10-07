@@ -2,7 +2,13 @@
 
 Seanime plugin for external English Forced / Signs & Songs subtitles. Adds only subtitle tracks through VideoCore; preserves your current video provider, quality and audio.
 
-## v0.6.0
+## v0.6.1 runtime fix
+
+- Moves the subtitle helpers and bundled XZ decoder inside the registered UI callback. Seanime serializes this callback into a separate JavaScript VM, so helpers outside it are unavailable there.
+- Normalizes native Goja string wrappers and supports `uri`, `sourceUrl`, and `format` alongside legacy `src`/`type`. Skips tracks without URL/content rather than sending invalid fetch arguments.
+- Tests now evaluate the serialized callback in a fresh VM, reproducing Seanime's UI registration behavior.
+
+## v0.6.0 content and source changes
 
 - Reads current provider tracks, then English dub and softsub content from Animeya, rather than requiring forced labels.
 - Logs cue counts, covered seconds and final timestamps without logging subtitle text or signed URLs.
@@ -28,7 +34,7 @@ The original AnimeTosho API does expose a working alternate source: release `586
 
 Observed Vidnest subtitle CDN domains are explicitly allowed; rotations can require a manifest update. XZ support intentionally accepts CRC32/LZMA2 only: maximum 512 KiB compressed input, 2 MiB output, 8 MiB dictionary, 16 blocks. Unsupported/corrupt streams fail visibly. ASS custom fonts are not downloaded, so rendering may substitute fonts.
 
-Tested with live API/attachment data, nine regression/replay checks and mocked VideoCore injection. The real attachment also decoded byte for byte inside Seanime's exact Goja version, using its native binary response representation. Actual Seanime display and alignment remain to be verified in the user's player.
+Tested with live API/attachment data, ten regression/replay checks and mocked VideoCore injection. The real attachment also decoded byte for byte inside Seanime's exact Goja version after callback serialization into a fresh UI VM; native `*string` subtitle URIs and empty tracks were tested there too. Actual Seanime display and alignment remain to be verified in the user's player.
 
 ## Development
 
