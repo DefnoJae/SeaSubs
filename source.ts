@@ -72,7 +72,7 @@ function init() {
         const API_KEY = "{{apiKey}}"
         const PREFER_FORCED = String("{{preferForced}}") !== "false"
         const API = "https://api.opensubtitles.com/api/v1"
-        const UA = "SeaSubs v0.7.2"
+        const UA = "SeaSubs v0.7.3"
 
         let title = ""
         let episode = 0
@@ -150,7 +150,7 @@ function init() {
             }, 500)
         }
 
-        const tray = ctx.newTray({ withContent: true, iconUrl: "https://raw.githubusercontent.com/DefnoJae/SeaSubs/main/icon.png" })
+        const tray = ctx.newTray({ withContent: true, iconUrl: "https://raw.githubusercontent.com/DefnoJae/SeaSubs/main/marketplace-icon.svg" })
         const palette = ctx.newCommandPalette({
             placeholder: "SeaSubs — search Forced / Signs & Songs",
             keyboardShortcut: "mod+shift+s",
