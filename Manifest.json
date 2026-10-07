@@ -1,1 +1,36 @@
-
+{
+  "id": "seasubs",
+  "name": "SeaSubs",
+  "version": "0.1.0",
+  "manifestURI": "https://raw.githubusercontent.com/DefnoJae/SeaSubs/main/Manifest.json",
+  "language": "typescript",
+  "type": "plugin",
+  "description": "Find and load external English Forced / Signs & Songs subtitles when the current release does not include them.",
+  "author": "DefnoJae",
+  "website": "https://github.com/DefnoJae/SeaSubs",
+  "lang": "en",
+  "payload": "",
+  "payloadURI": "https://raw.githubusercontent.com/DefnoJae/SeaSubs/main/code.ts",
+  "userConfig": {
+    "version": 1,
+    "requiresConfig": true,
+    "fields": [
+      {"type":"text","name":"apiKey","label":"OpenSubtitles API key","default":"","description":"Create an API consumer key on OpenSubtitles.com."},
+      {"type":"text","name":"username","label":"OpenSubtitles username","default":""},
+      {"type":"text","name":"password","label":"OpenSubtitles password","default":""},
+      {"type":"switch","name":"preferForced","label":"Prefer Forced / Signs & Songs results","default":"true"}
+    ]
+  },
+  "plugin": {
+    "version": "1",
+    "permissions": {
+      "scopes": ["storage","playback"],
+      "allow": {
+        "networkAccess": {
+          "allowedDomains": ["api.opensubtitles.com","*.opensubtitles.com"],
+          "reasoning": "SeaSubs searches OpenSubtitles and requests temporary subtitle download links."
+        }
+      }
+    }
+  }
+}
