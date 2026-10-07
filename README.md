@@ -2,6 +2,16 @@
 
 Seanime plugin for external English Forced / Signs & Songs subtitles. Adds only subtitle tracks through VideoCore; preserves your current video provider, quality and audio.
 
+## v0.7.0 faster search and episode following
+
+- Tries the original AnimeTosho source first, checking the most likely dub/remembered release before expanding the search. Returns the first readable signs track without waiting for Animeya, a slow alternate host, or unrelated downloads. Falls back to wider release checks, AnimeTosho.xyz and then current-provider/Animeya content when needed.
+- Uses eight-second feed/detail timeouts, a five-minute feed cache and a bounded in-memory cache of selected decoded tracks (six episodes / eight million characters). Revisiting a cached episode needs no subtitle downloads. Signed subtitle URLs/content are not saved to persistent storage.
+- Choosing a verified signs track enables **Automatic Signs & Songs** for that anime and sub/dub mode. The enabled setting and release hint persist across extension reloads/restarts. On the next episode, SeaSubs searches for that episode's own track and adds it automatically; it never reuses the previous episode's subtitles for a new episode.
+- Repeated player events are coalesced; stale results are discarded during rapid skips, and the newest episode is queued while an older search finishes.
+- Use **Pause automatic subtitles** in the tray to turn following off for the current anime. Unverified plain English captions never enable automatic following and are never automatically selected. If no verified track or derivable ASS is available, SeaSubs leaves playback alone and reports the missing match.
+
+After upgrading, select a signs track once to enable following for the anime, or use the tray's Enable automatic subtitles button. Provider, video quality and audio are preserved.
+
 ## v0.6.1 runtime fix
 
 - Moves the subtitle helpers and bundled XZ decoder inside the registered UI callback. Seanime serializes this callback into a separate JavaScript VM, so helpers outside it are unavailable there.
@@ -34,7 +44,7 @@ The original AnimeTosho API does expose a working alternate source: release `586
 
 Observed Vidnest subtitle CDN domains are explicitly allowed; rotations can require a manifest update. XZ support intentionally accepts CRC32/LZMA2 only: maximum 512 KiB compressed input, 2 MiB output, 8 MiB dictionary, 16 blocks. Unsupported/corrupt streams fail visibly. ASS custom fonts are not downloaded, so rendering may substitute fonts.
 
-Tested with live API/attachment data, ten regression/replay checks and mocked VideoCore injection. The real attachment also decoded byte for byte inside Seanime's exact Goja version after callback serialization into a fresh UI VM; native `*string` subtitle URIs and empty tracks were tested there too. Actual Seanime display and alignment remain to be verified in the user's player.
+Tested with live API/attachment data, fifteen regression/replay checks and mocked VideoCore injection, including search request counts, next-episode following, saved preferences, pause, cached revisits and rapid skips. The real attachment also decoded byte for byte inside Seanime's exact Goja version after callback serialization into a fresh UI VM; native `*string` subtitle URIs and empty tracks were tested there too. The user confirmed v0.6.1 renders successfully; v0.7.0's automatic episode following remains to be checked in the user's player.
 
 ## Development
 

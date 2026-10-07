@@ -91,7 +91,7 @@ buffer/index.js:
         const API_KEY = "{{apiKey}}"
         const PREFER_FORCED = String("{{preferForced}}") !== "false"
         const API = "https://api.opensubtitles.com/api/v1"
-        const UA = "SeaSubs v0.6.1"
+        const UA = "SeaSubs v0.7.0"
 
         let title = ""
         let episode = 0
@@ -102,7 +102,72 @@ buffer/index.js:
         let dubbed = false
         let searching = false
         let unreadable = 0
-        const playbackKey = () => String(ctx.videoCore.getCurrentPlaybackInfo()?.id || "") + "|" + mediaId + "|" + episode
+        let pendingAuto = false
+        let autoAttemptedKey = ""
+        let autoCancel: (() => void) | undefined
+        let autoScheduledKey = ""
+        const cachedTracks: Record<string, AnimeToshoResult> = {}
+        const cacheOrder: string[] = []
+        const feedCache: Record<string, { time: number, rows: any[] }> = {}
+        const seriesKey = () => String(mediaId) + "|" + String(dubbed)
+        const episodeKey = () => seriesKey() + "|" + episode
+        type FollowPreference = { enabled: boolean, releaseHint: string }
+        const preferences: Record<string, FollowPreference> = {}
+        const playbackKey = () => String(ctx.videoCore.getCurrentPlaybackInfo()?.id || "") + "|" + seriesKey() + "|" + episode
+
+        function followPreference(): FollowPreference {
+            const key = seriesKey()
+            if (!preferences[key]) {
+                try { preferences[key] = $storage.get<FollowPreference>("follow-" + key) || { enabled: false, releaseHint: "" } }
+                catch (_) { preferences[key] = { enabled: false, releaseHint: "" } }
+            }
+            return preferences[key]
+        }
+
+        function savePreference(preference: FollowPreference): void {
+            preferences[seriesKey()] = preference
+            try { $storage.set("follow-" + seriesKey(), preference) }
+            catch (err) { console.log("SeaSubs preference save failed", String(err)) }
+            tray.update()
+        }
+
+        function cacheTrack(item: AnimeToshoResult): void {
+            if (!item.content || item.content.length > 2000000) return
+            const key = episodeKey()
+            cachedTracks[key] = { ...item, playback: undefined }
+            const at = cacheOrder.indexOf(key)
+            if (at >= 0) cacheOrder.splice(at, 1)
+            cacheOrder.push(key)
+            let size = () => cacheOrder.reduce((n, k) => n + (cachedTracks[k]?.content?.length || 0), 0)
+            while (cacheOrder.length > 6 || size() > 8000000) delete cachedTracks[cacheOrder.shift()!]
+        }
+
+        function rememberChoice(item: AnimeToshoResult): void {
+            // Unverified plain captions must never silently become automatic dialogue.
+            if (item.score < 500) return
+            cacheTrack(item)
+            const releaseHint = item.label.match(/\[([^\]]+)\]/)?.[1] || ""
+            savePreference({ enabled: true, releaseHint })
+            autoAttemptedKey = playbackKey()
+        }
+
+        function scheduleAuto(): void {
+            syncFromVideoCore()
+            const key = playbackKey()
+            if (!mediaId || !episode || !followPreference().enabled || autoAttemptedKey === key) return
+            if (autoCancel && autoScheduledKey === key) return
+            if (autoCancel) autoCancel()
+            autoScheduledKey = key
+            autoCancel = ctx.setTimeout(() => {
+                autoCancel = undefined
+                autoScheduledKey = ""
+                syncFromVideoCore()
+                if (key !== playbackKey() || !followPreference().enabled) return
+                if (searching) { pendingAuto = true; return }
+                autoAttemptedKey = key
+                void search(true)
+            }, 500)
+        }
 
         const tray = ctx.newTray({ withContent: true, iconUrl: "" })
         const palette = ctx.newCommandPalette({
@@ -151,6 +216,7 @@ buffer/index.js:
             content?: string
             playback?: string
             sourceMode?: string
+            automatic?: boolean
         }
 
         function animeToshoScore(name: string, release: string): number {
@@ -179,22 +245,39 @@ buffer/index.js:
             return out
         }
 
-        async function searchAnimeToshoHost(host: string, eid: number): Promise<AnimeToshoResult[]> {
+        async function searchAnimeToshoHost(host: string, eid: number, expanded = false): Promise<AnimeToshoResult[]> {
+            const key = playbackKey()
             const feedUrl = host.indexOf(".xyz") >= 0
                 ? "https://feed.animetosho.xyz/feed/json?eid=" + eid
                 : "https://feed.animetosho.org/json?eid=" + eid
             const detailBase = host.indexOf(".xyz") >= 0
                 ? "https://feed.animetosho.xyz/json?show=torrent&id="
                 : "https://feed.animetosho.org/json?show=torrent&id="
-            const feed = await ctx.fetch(feedUrl)
-            if (!feed.ok) return []
-            const entries = feed.json() as any[]
+            let entries: any[]
+            const cachedFeed = feedCache[feedUrl]
+            if (cachedFeed && Date.now() - cachedFeed.time < 300000) entries = cachedFeed.rows
+            else {
+                const feed = await ctx.fetch(feedUrl, { timeout: 8 })
+                if (!feed.ok) return []
+                entries = feed.json() as any[]
+                if (Array.isArray(entries)) {
+                    feedCache[feedUrl] = { time: Date.now(), rows: entries }
+                    if (Object.keys(feedCache).length > 12) delete feedCache[Object.keys(feedCache)[0]]
+                }
+            }
+            if (key !== playbackKey()) return []
             const candidates = (Array.isArray(entries) ? entries : [])
                 .filter((e: any) => !e.status || e.status === "complete")
+                .sort((a: any, b: any) => {
+                    const hint = followPreference().releaseHint
+                    const rank = (e: any) => (hint && String(e.title || "").includes("[" + hint + "]") ? 10 : 0)
+                        + (dubbed && /dub|dual|multi.?audio/i.test(String(e.title || "")) ? 3 : 0)
+                    return rank(b) - rank(a)
+                })
                 .slice(0, 12)
-            const details = await Promise.all(candidates.map(async (entry: any) => {
+            const details = await Promise.all((expanded ? candidates.slice(1) : candidates.slice(0, 1)).map(async (entry: any) => {
                 try {
-                    const r = await ctx.fetch(detailBase + entry.id)
+                    const r = await ctx.fetch(detailBase + entry.id, { timeout: 8 })
                     if (!r.ok) return null
                     return { torrent: r.json() as any, entry }
                 } catch (_) { return null }
@@ -241,14 +324,32 @@ buffer/index.js:
         async function searchAnimeTosho(): Promise<AnimeToshoResult[]> {
             if (!mediaId || !episode) return []
             try {
-                const metadata = await ctx.anime.getAnimeMetadata("anilist", mediaId)
-                const epMeta = metadata?.episodes?.[String(episode)]
+                const key = playbackKey(), requestedMedia = mediaId, requestedEpisode = episode
+                const metadata = await ctx.anime.getAnimeMetadata("anilist", requestedMedia)
+                if (key !== playbackKey()) return []
+                const epMeta = metadata?.episodes?.[String(requestedEpisode)]
                 const eid = Number(epMeta?.anidbId || 0)
                 if (!eid) return []
-                const sources = await Promise.all(["animetosho.xyz", "animetosho.org"].map(async host => {
-                    try { return await searchAnimeToshoHost(host, eid) }
-                    catch (err) { console.log("SeaSubs AnimeTosho host failed", host, String(err)); return [] }
-                }))
+                const sources: AnimeToshoResult[][] = []
+                // A fast working source should not wait for a slow alternate host.
+                for (const host of ["animetosho.org", "animetosho.xyz"]) {
+                    for (const expanded of [false, true]) {
+                        if (key !== playbackKey()) return []
+                        try {
+                            const list = await searchAnimeToshoHost(host, eid, expanded)
+                            sources.push(list)
+                            const direct = list.filter(i => i.mode === "direct").sort((a, b) => b.score - a.score)
+                            for (const item of direct) {
+                                const content = await readCandidate(item)
+                                if (key !== playbackKey()) return []
+                                if (content) {
+                                    console.log("SeaSubs fast Signs match", { source: item.label, events: (content.match(/^Dialogue\s*:/gm) || []).length })
+                                    return [{ ...item, content }]
+                                }
+                            }
+                        } catch (err) { console.log("SeaSubs AnimeTosho host failed", host, String(err)) }
+                    }
+                }
                 const seen: Record<string, boolean> = {}
                 const out: AnimeToshoResult[] = []
                 for (const list of sources) {
@@ -351,11 +452,13 @@ buffer/index.js:
         async function loadCandidate(item: AnimeToshoResult): Promise<void> {
             syncFromVideoCore()
             if (item.playback !== playbackKey()) { ctx.toast.warning("SeaSubs: episode changed; search again."); return }
+            if (item.automatic && !followPreference().enabled) return
             if (item.mode === "derive") { void deriveAndInject(item); return }
             if (/\.xz(?:[?#]|$)/i.test(item.url) && !item.content) {
                 item.content = await readCandidate(item)
                 syncFromVideoCore()
                 if (item.playback !== playbackKey()) return
+                if (item.automatic && !followPreference().enabled) return
                 if (!item.content) { ctx.toast.error("SeaSubs: compressed subtitle could not be read; see log."); return }
             }
             if (item.content) {
@@ -364,9 +467,19 @@ buffer/index.js:
                 ctx.toast.success("SeaSubs: subtitle track added.")
                 palette.close()
             } else injectExternal(item.url, item.label, item.language, item.type)
+            rememberChoice(item)
         }
 
-        function showCandidates(items: AnimeToshoResult[], key: string): void {
+        function showCandidates(items: AnimeToshoResult[], key: string, automatic = false): void {
+            if (key !== playbackKey()) return
+            if (automatic) {
+                const safe = items.find(i => i.score >= 500 && i.mode === "direct" && !!i.content)
+                if (safe) { void loadCandidate({ ...safe, playback: key, automatic: true }).catch(err => console.log("SeaSubs auto load failed", String(err))); return }
+                const derive = items.find(i => i.mode === "derive")
+                if (derive && followPreference().enabled) { void deriveAndInject({ ...derive, playback: key, automatic: true }).catch(err => console.log("SeaSubs auto derive failed", String(err))); return }
+                ctx.toast.warning("SeaSubs: no verified signs track for this episode; use Find external subtitles to choose a fallback.")
+                return
+            }
             palette.setItems(items.slice(0, 25).map((item, i) => ({ label: item.label, value: String(i),
                 heading: i === 0 ? "Subtitle tracks — unverified captions may contain dialogue" : undefined,
                 onSelect: () => { void loadCandidate({ ...item, playback: key }).catch(err => { console.log("SeaSubs load failed", String(err)); ctx.toast.error("SeaSubs: subtitle load failed.") }) } })))
@@ -473,6 +586,7 @@ buffer/index.js:
             const full = await fetchSubtitleText(item)
             syncFromVideoCore()
             if (item.playback && item.playback !== playbackKey()) { ctx.toast.warning("SeaSubs: episode changed; search again."); return }
+            if (item.automatic && !followPreference().enabled) return
             if (!full) {
                 ctx.toast.error("SeaSubs: couldn't read this ASS/SSA subtitle as text.")
                 return
@@ -492,6 +606,8 @@ buffer/index.js:
             ctx.videoCore.showMessage("SeaSubs generated Signs & Songs", 2500)
             ctx.toast.success("SeaSubs: generated " + derived.count + " Signs / Songs events.")
             palette.close()
+            rememberChoice({ ...item, mode: "direct", content: derived.content, score: 2000,
+                label: "Generated Signs & Songs — " + item.label })
         }
 
         async function animeyaRpc(method: string, input: any): Promise<any> {
@@ -642,16 +758,19 @@ buffer/index.js:
             }
         }
 
-        async function search(): Promise<void> {
+        async function search(automatic = false): Promise<void> {
             if (searching) return
             searching = true
             unreadable = 0
-            try { await runSearch() }
+            try { await runSearch(automatic) }
             catch (err) { console.log("SeaSubs search failed", String(err)); ctx.toast.error("SeaSubs: search failed; see log.") }
-            finally { searching = false }
+            finally {
+                searching = false
+                if (pendingAuto) { pendingAuto = false; scheduleAuto() }
+            }
         }
 
-        async function runSearch(): Promise<void> {
+        async function runSearch(automatic = false): Promise<void> {
             syncFromVideoCore()
             if (!title || !episode) {
                 ctx.toast.warning("SeaSubs: start an episode first so I know what to search for.")
@@ -659,19 +778,28 @@ buffer/index.js:
             }
             ctx.toast.info("SeaSubs: searching Signs & Songs for " + title + " E" + episode + "…")
             const key = playbackKey()
-            const current = await currentCandidates()
-            const animeya = await searchAnimeyaForced()
-            syncFromVideoCore()
-            if (key !== playbackKey()) return
-            const candidates = current.concat(animeya).sort((a, b) => b.score - a.score)
-            if (candidates.some(i => i.score >= 2000)) {
-                showCandidates(candidates, key)
+            if (automatic && !followPreference().enabled) return
+            const cached = cachedTracks[episodeKey()]
+            if (cached) {
+                showCandidates([cached], key, automatic)
                 return
             }
 
             const animeTosho = await searchAnimeTosho()
             syncFromVideoCore()
             if (key !== playbackKey()) return
+            if (animeTosho.some(i => i.content && i.mode === "direct")) {
+                showCandidates(animeTosho, key, automatic)
+                return
+            }
+            const sources = await Promise.all([currentCandidates(), searchAnimeyaForced()])
+            syncFromVideoCore()
+            if (key !== playbackKey()) return
+            const candidates = sources[0].concat(sources[1]).sort((a, b) => b.score - a.score)
+            if (candidates.some(i => i.score >= 2000)) {
+                showCandidates(candidates, key, automatic)
+                return
+            }
             if (animeTosho.length) {
                 const direct = animeTosho.filter(x => x.mode === "direct")
                 const derived = animeTosho.filter(x => x.mode === "derive")
@@ -686,15 +814,15 @@ buffer/index.js:
                     ctx.toast.warning("SeaSubs: matching subtitles were found but could not be read; see log.")
                     return
                 }
-                showCandidates(choices.concat(candidates), key)
+                showCandidates(choices.concat(candidates), key, automatic)
                 return
             }
             if (candidates.length) {
                 ctx.toast.warning("SeaSubs: no verified Signs & Songs; dub captions are available to preview." + (unreadable ? " Some subtitle files could not be inspected (see log)." : ""))
-                showCandidates(candidates, key)
+                showCandidates(candidates, key, automatic)
                 return
             }
-            if (!API_KEY) {
+            if (!API_KEY || automatic) {
                 ctx.toast.warning("SeaSubs: no verified Signs & Songs found." + (unreadable ? " Some subtitle files could not be inspected (see log)." : ""))
                 return
             }
@@ -807,12 +935,13 @@ buffer/index.js:
             tray.update()
         }
 
-        ctx.videoCore.addEventListener("video-loaded", () => syncFromVideoCore())
-        ctx.videoCore.addEventListener("video-playback-state", () => syncFromVideoCore())
+        ctx.videoCore.addEventListener("video-loaded", () => scheduleAuto())
+        ctx.videoCore.addEventListener("video-playback-state", () => scheduleAuto())
         ctx.videoCore.addEventListener("video-playlist", (event) => {
             const ep = event?.playlist?.currentEpisode?.episodeNumber
             if (ep) episode = Number(ep)
             syncFromVideoCore()
+            scheduleAuto()
         })
 
         ctx.playback.registerEventListener((event) => {
@@ -821,17 +950,28 @@ buffer/index.js:
             tray.update()
         })
 
-        ctx.dom.onReady(() => syncFromVideoCore())
+        ctx.dom.onReady(() => scheduleAuto())
         ctx.screen.onNavigate(() => syncFromVideoCore())
         ctx.screen.loadCurrent()
 
         ctx.registerEventHandler("seasubs-search", () => { void search() })
+        ctx.registerEventHandler("seasubs-follow", () => {
+            syncFromVideoCore()
+            if (!mediaId || !episode) return
+            const preference = followPreference()
+            savePreference({ ...preference, enabled: !preference.enabled })
+            autoAttemptedKey = ""
+            if (preference.enabled && autoCancel) { autoCancel(); autoCancel = undefined; autoScheduledKey = "" }
+            if (!preference.enabled) scheduleAuto()
+        })
 
         tray.render(() => tray.stack([
             tray.text("SeaSubs"),
             tray.text("External Forced / Signs & Songs subtitle fallback."),
             tray.text(title && episode ? title + " — Episode " + episode : "Start an episode, then search."),
             tray.button("Find external subtitles", { onClick: "seasubs-search", intent: "primary" }),
+            tray.text(followPreference().enabled ? "Automatic Signs & Songs is on for this anime." : "Choose a signs track to continue automatically on the next episode."),
+            tray.button(followPreference().enabled ? "Pause automatic subtitles" : "Enable automatic subtitles", { onClick: "seasubs-follow" }),
             tray.text("Shortcut: Ctrl/Cmd + Shift + S"),
         ]))
     })

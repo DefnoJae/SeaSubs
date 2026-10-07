@@ -6,29 +6,36 @@ const ts = require('typescript');
 const path = require('node:path');
 const root = path.resolve(__dirname, '..');
 const encoded = '/Td6WFoAAAFpIt42AgAhARYAAAB0L+Wj4AC2AJRdAC2UyMtHifLr5yTJxebCHSxfVkqNWXIPxgJIapMQKExT/N3Z7OVSi3s9v9hZrhfZR9YvoXRXW5inxLdC+ikFjefmBr0yuTyJ6GwfQEeYVLP8/aeVoeJLDN8QisM3Py8muktdEzfW4bM74QkR9bT1HFpprg0e/eEJGzWOqINlLHz2asmlOA9X/PqQltzB3gXOB81ygAAA1B/VhAABrAG3AQAA7DCMET4wDYsCAAAAAAFZWg==';
-function harness(fetch) {
+function harness(fetch, storage = new Map()) {
     const injected = [], messages = [], palette = {items: [], setItems(v) { this.items = v }, open() {}, close() {} };
     let playback = { id: 'episode-a', subtitleTracks: [], onlinestreamParams: { episodeNumber: 4, dubbed: true } };
+    let media = {id:154692,title:{english:'Girlfriend, Girlfriend Season 2'}};
+    const listeners = new Map(), handlers = new Map(), timers = new Map(); let nextTimer = 0;
     const ctx = { fetch, newTray: () => ({update() {}, render() {}}), newCommandPalette: () => palette,
         toast: Object.fromEntries(['success','warning','error','info'].map(k => [k, x => messages.push(x)])),
-        videoCore: { getCurrentPlaybackInfo: () => playback, getCurrentMedia: () => ({ id:154692, title:{english:'Girlfriend, Girlfriend Season 2'} }),
-            getPlaybackState: () => ({playbackInfo:playback}), addExternalSubtitleTrack: t => injected.push(t), showMessage() {}, addEventListener() {} },
+        videoCore: { getCurrentPlaybackInfo: () => playback, getCurrentMedia: () => media,
+            getPlaybackState: () => ({playbackInfo:playback}), addExternalSubtitleTrack: t => injected.push(t), showMessage() {}, addEventListener:(name,fn) => listeners.set(name,fn) },
         playback:{ registerEventListener() {} }, dom:{ onReady() {} }, screen:{ onNavigate() {}, loadCurrent() {} },
-        anime:{ getAnimeMetadata: async () => ({episodes:{4:{anidbId:271605}}}) }, registerEventHandler() {} };
+        anime:{ getAnimeMetadata: async () => ({episodes:{4:{anidbId:271605},5:{anidbId:271606},6:{anidbId:271607}}}) },
+        setTimeout:(fn) => {const id = ++nextTimer; timers.set(id,fn); return () => timers.delete(id)},
+        registerEventHandler:(name,fn) => handlers.set(name,fn) };
     let callback;
     const rootSandbox = { $ui:{register: cb => {callback = cb.toString()} } };
     vm.createContext(rootSandbox);
     let code = fs.readFileSync(path.join(root,'code.ts'),'utf8');
     code = code.replace('ctx.registerEventHandler("seasubs-search",',
-        'globalThis.testHooks = {SeaSubsXZ, parseVtt, inferDubCompanion, deriveVtt, currentCandidates, runSearch, searchAnimeToshoHost, deriveSignsSongsAss, inspectCandidates, syncFromVideoCore, showCandidates, playbackKey}; ctx.registerEventHandler("seasubs-search",');
+        'globalThis.testHooks = {SeaSubsXZ, parseVtt, inferDubCompanion, deriveVtt, currentCandidates, runSearch, search, scheduleAuto, searchAnimeToshoHost, deriveSignsSongsAss, inspectCandidates, syncFromVideoCore, showCandidates, playbackKey}; ctx.registerEventHandler("seasubs-search",');
     vm.runInContext(ts.transpileModule(code, {compilerOptions:{target:ts.ScriptTarget.ES2018}}).outputText, rootSandbox);
     rootSandbox.init();
     // Seanime serializes the callback and evaluates it in a separate UI VM.
-    const sandbox = {console:{log() {}}, __ctx:ctx}; vm.createContext(sandbox);
+    const sandbox = {console:{log() {}}, __ctx:ctx, $storage:{get:key => storage.get(key),set:(key,value) => storage.set(key,JSON.parse(JSON.stringify(value)))}}; vm.createContext(sandbox);
     vm.runInContext('(' + callback + ').call(undefined, __ctx)', sandbox);
     sandbox.testHooks.syncFromVideoCore();
-    return { sandbox, hooks:sandbox.testHooks, palette, injected, messages,
-        setTracks:tracks => {playback.subtitleTracks = tracks}, change:() => {playback = {...playback,id:'episode-b'};} };
+    return { sandbox, hooks:sandbox.testHooks, palette, injected, messages, storage,
+        setTracks:tracks => {playback.subtitleTracks = tracks},
+        change:(ep=4,mediaId=154692) => {playback = {...playback,id:'episode-'+ep,onlinestreamParams:{episodeNumber:ep,dubbed:true}}; media={...media,id:mediaId}},
+        emit:name => listeners.get(name)?.({}), handle:name => handlers.get(name)?.(),
+        flushTimers:() => {const fns=[...timers.values()]; timers.clear(); for(const fn of fns) fn()} };
 }
 const response = text => ({ok:true,status:200,text:() => text,json:() => JSON.parse(text)});
 const stamp = n => new Date(n * 1000).toISOString().slice(11,23);
@@ -107,6 +114,65 @@ test('current URI wrappers become primitive URLs; empty tracks are skipped', asy
     const items = await h.hooks.currentCandidates();
     assert.deepEqual(calls,['https://cdn.test/signs.vtt']);
     assert.equal(items.length,1); assert.match(items[0].content,/TEST/);
+});
+
+const settle = async () => {for(let i=0;i<8;i++) await new Promise(r => setImmediate(r))};
+function fastSource(calls, waitForEp5) {
+    return async url => {
+        calls.push(url);
+        if (url.includes('feed.animetosho.org/json?eid=')) {
+            const eid = Number(new URL(url).searchParams.get('eid'));
+            if (eid === 271606 && waitForEp5) await waitForEp5;
+            return response(JSON.stringify([{id:eid,title:'[Yameii] English Dub',status:'complete'}]));
+        }
+        if (url.includes('show=torrent')) return response(JSON.stringify({title:'[Yameii] English Dub',files:[{attachments:[{id:Number(new URL(url).searchParams.get('id')),type:'subtitle',info:{codec:'ASS',lang:'eng',name:'English Signs'}}]}]}));
+        if (url.includes('/storage/attach/')) return {ok:true,body:Uint8Array.from(Buffer.from(encoded,'base64'))};
+        throw Error('Fast match should not contact slower fallback '+url);
+    };
+}
+function chooseInitial(h) {
+    h.hooks.showCandidates([{label:'English Signs — [Yameii] E4',url:'',type:'ass',language:'en',mode:'direct',score:1000,content:'[Script Info]\n[Events]\nOLD EPISODE SIGN'}],h.hooks.playbackKey());
+    h.palette.items[0].onSelect();
+}
+test('fast match uses one release and does not wait for Animeya or the alternate host', async () => {
+    const calls=[],h=harness(fastSource(calls));
+    await h.hooks.runSearch();
+    assert.equal(calls.length,3); assert.match(h.palette.items[0].label,/English Signs/);
+    assert.ok(calls.every(url => !url.includes('animeya') && !url.includes('.xyz')));
+});
+test('choosing Signs enables next-episode auto loading, deduplicates events and caches revisits', async () => {
+    const calls=[],h=harness(fastSource(calls));
+    chooseInitial(h); await settle();
+    assert.equal(h.storage.get('follow-154692|true').enabled,true);
+    h.change(5); h.emit('video-loaded'); h.emit('video-playback-state'); h.flushTimers(); await settle();
+    assert.equal(h.injected.length,2); assert.match(h.injected[1].content,/TEST SIGN/);
+    assert.ok(calls[0].includes('eid=271606'));
+    h.emit('video-playback-state'); h.flushTimers(); await settle(); assert.equal(h.injected.length,2);
+    const count=calls.length;
+    h.change(4); h.emit('video-loaded'); h.flushTimers(); await settle();
+    assert.equal(h.injected.length,3); assert.match(h.injected[2].content,/OLD EPISODE SIGN/); assert.equal(calls.length,count);
+});
+test('automatic preference survives UI reload, remains scoped to the anime and can be paused', async () => {
+    const storage=new Map(),first=harness(fastSource([]),storage); chooseInitial(first); await settle();
+    const calls=[],h=harness(fastSource(calls),storage);
+    h.change(5); h.emit('video-loaded'); h.flushTimers(); await settle(); assert.equal(h.injected.length,1);
+    h.handle('seasubs-follow'); h.change(6); h.emit('video-loaded'); h.flushTimers(); await settle(); assert.equal(h.injected.length,1);
+    h.change(5,999999); h.emit('video-loaded'); h.flushTimers(); await settle(); assert.equal(h.injected.length,1);
+});
+test('rapid episode changes discard an in-flight result and load the newest episode', async () => {
+    let release; const delayed=new Promise(r=>{release=r});
+    const calls=[],h=harness(fastSource(calls,delayed)); chooseInitial(h); await settle();
+    h.change(5); h.emit('video-loaded'); h.flushTimers(); await settle();
+    h.change(6); h.emit('video-loaded'); h.flushTimers(); await settle(); release(); await settle();
+    h.flushTimers(); await settle();
+    assert.equal(h.injected.length,2); assert.ok(calls.some(url=>url.includes('eid=271607')));
+    assert.ok(!calls.some(url=>url.includes('show=torrent&id=271606')));
+});
+test('unverified captions never enable automatic subtitle following', async () => {
+    const h=harness();
+    h.hooks.showCandidates([{label:'Unverified English dub',url:'',content:'WEBVTT\n\n00:01.000 --> 00:02.000\ndialogue',language:'en',type:'vtt',mode:'direct',score:10}],h.hooks.playbackKey());
+    h.palette.items[0].onSelect(); await settle();
+    assert.equal(h.storage.size,0);
 });
 
 test('live captured episode responses survive blocked VTT and inject the real 20-event Signs ASS',
