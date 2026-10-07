@@ -2,9 +2,9 @@
 
 Seanime plugin for external English Forced / Signs & Songs subtitles. Adds only subtitle tracks through VideoCore; preserves your current video provider, quality and audio.
 
-## v0.7.3 icon framing
+## v0.7.4 icon framing
 
-- Wraps the original logo in a square SVG with 10% padding on each side so the marketplace's cropped, rounded frame shows the complete artwork.
+- Uses a padded square PNG of the supplied logo so the marketplace's cropped, rounded frame shows the complete artwork.
 
 ## v0.7.2 updated logo
 
