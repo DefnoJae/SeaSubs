@@ -1,7 +1,7 @@
 {
   "id": "seasubs",
   "name": "SeaSubs",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "manifestURI": "https://raw.githubusercontent.com/DefnoJae/SeaSubs/main/Manifest.json",
   "language": "typescript",
   "type": "plugin",
@@ -13,11 +13,9 @@
   "payloadURI": "https://raw.githubusercontent.com/DefnoJae/SeaSubs/main/code.ts",
   "userConfig": {
     "version": 1,
-    "requiresConfig": true,
+    "requiresConfig": false,
     "fields": [
-      {"type":"text","name":"apiKey","label":"OpenSubtitles API key","default":"","description":"Create an API consumer key on OpenSubtitles.com."},
-      {"type":"text","name":"username","label":"OpenSubtitles username","default":""},
-      {"type":"text","name":"password","label":"OpenSubtitles password","default":""},
+      {"type":"text","name":"apiKey","label":"OpenSubtitles API key (optional)","default":"","description":"Optional source. SeaSubs can be installed and opened without configuring an OpenSubtitles account."},
       {"type":"switch","name":"preferForced","label":"Prefer Forced / Signs & Songs results","default":"true"}
     ]
   },
