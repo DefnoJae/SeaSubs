@@ -16,8 +16,6 @@ type OSResult = {
 function init() {
     $ui.register((ctx) => {
         const API_KEY = "{{apiKey}}"
-        const USERNAME = "{{username}}"
-        const PASSWORD = "{{password}}"
         const PREFER_FORCED = "{{preferForced}}" !== "false"
         const API = "https://api.opensubtitles.com/api/v1"
         const UA = "SeaSubs v0.1.0"
@@ -44,29 +42,6 @@ function init() {
             return h
         }
 
-        async function login(): Promise<boolean> {
-            if (token) return true
-            if (!API_KEY || !USERNAME || !PASSWORD) {
-                ctx.toast.error("SeaSubs: configure your OpenSubtitles API key, username and password.")
-                return false
-            }
-            const r = await ctx.fetch(API + "/login", {
-                method: "POST",
-                headers: { ...headers(false), "Content-Type": "application/json" },
-                body: JSON.stringify({ username: USERNAME, password: PASSWORD }),
-            })
-            if (!r.ok) {
-                ctx.toast.error("SeaSubs: OpenSubtitles login failed (" + r.status + ").")
-                return false
-            }
-            const data = r.json() as any
-            token = data.token || ""
-            if (data.base_url) {
-                const host = String(data.base_url).replace(/^https?:\/\//, "").replace(/\/$/, "")
-                baseUrl = "https://" + host + "/api/v1"
-            }
-            return !!token
-        }
 
         function score(item: OSResult): number {
             const a = item.attributes || {}
@@ -94,7 +69,7 @@ function init() {
                 return
             }
             if (!API_KEY) {
-                ctx.toast.error("SeaSubs: OpenSubtitles API key is missing.")
+                ctx.toast.warning("SeaSubs: no subtitle source is configured yet. OpenSubtitles is optional; add an API key if you want to use it.")
                 return
             }
             ctx.toast.info("SeaSubs: searching English subtitles for " + title + " E" + episode + "…")
@@ -131,10 +106,9 @@ function init() {
                 ctx.toast.error("SeaSubs: this result has no downloadable subtitle file.")
                 return
             }
-            if (!(await login())) return
             const r = await ctx.fetch(baseUrl + "/download", {
                 method: "POST",
-                headers: { ...headers(true), "Content-Type": "application/json" },
+                headers: { ...headers(false), "Content-Type": "application/json" },
                 body: JSON.stringify({ file_id: fileId }),
             })
             if (!r.ok) {
