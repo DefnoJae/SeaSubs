@@ -18,7 +18,7 @@ function init() {
         const API_KEY = "{{apiKey}}"
         const PREFER_FORCED = "{{preferForced}}" !== "false"
         const API = "https://api.opensubtitles.com/api/v1"
-        const UA = "SeaSubs v0.5.0"
+        const UA = "SeaSubs v0.5.1"
 
         let title = ""
         let episode = 0
@@ -135,15 +135,17 @@ function init() {
                     const rawType = String(info.codec || info.format || "ass").toLowerCase()
                     const type = rawType.indexOf("ssa") >= 0 ? "ssa" : rawType.indexOf("srt") >= 0 ? "srt" : rawType.indexOf("vtt") >= 0 ? "vtt" : "ass"
                     const directScore = animeToshoScore(name, release) + (forced ? 1200 : 0)
-                    const converterUrl = attach.id ? "https://sub.wyzie.io/c/animetosho/id/" + attach.id + ".animetosho?format=" + encodeURIComponent(type) : ""
                     const originalUrl = String(attach.url || "")
-                    const url = converterUrl || originalUrl
-                    if (!url) continue
+                    const isPlainSubtitleUrl = /\.(?:ass|ssa|srt|vtt)(?:[?#]|$)/i.test(originalUrl)
 
-                    if (directScore >= 500) {
+                    // AnimeTosho attachment URLs are commonly .xz archives. Older SeaSubs builds
+                    // routed those through a legacy Wyzie conversion URL, but current Wyzie
+                    // download links require a signed token. Never surface a candidate we cannot
+                    // actually load.
+                    if (directScore >= 500 && isPlainSubtitleUrl) {
                         out.push({
                             label: (forced ? "★ Forced — " : "★ ") + (name || "English Signs & Songs") + " — " + release,
-                            url, fallbackUrl: originalUrl || undefined, type, language: "en", score: directScore, mode: "direct",
+                            url: originalUrl, type, language: "en", score: directScore, mode: "direct",
                         })
                     } else if ((type === "ass" || type === "ssa") && /\.(?:ass|ssa)(?:[?#]|$)/i.test(originalUrl)) {
                         // Only offer generation when AnimeTosho exposes an actual plaintext ASS/SSA URL.
