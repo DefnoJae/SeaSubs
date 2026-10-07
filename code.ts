@@ -18,7 +18,7 @@ function init() {
         const API_KEY = "{{apiKey}}"
         const PREFER_FORCED = "{{preferForced}}" !== "false"
         const API = "https://api.opensubtitles.com/api/v1"
-        const UA = "SeaSubs v0.5.1"
+        const UA = "SeaSubs v0.5.2"
 
         let title = ""
         let episode = 0
@@ -332,7 +332,11 @@ function init() {
                 headers: { "Referer": "https://animeya.cc/", "User-Agent": "Mozilla/5.0" },
                 timeout: 20,
             })
-            if (!r.ok) throw new Error("Animeya HTTP " + r.status)
+            if (!r.ok) {
+                let detail = ""
+                try { detail = String(r.text() || "").slice(0, 300) } catch (_) {}
+                throw new Error("Animeya HTTP " + r.status + (detail ? ": " + detail : ""))
+            }
             const body = r.json() as any
             if (body?.error) throw new Error(body.error?.json?.message || body.error?.message || "Animeya API error")
             return body?.result?.data?.json
@@ -372,7 +376,9 @@ function init() {
                     pageSize: 50,
                     skipInitialData: true,
                     filters: { search: title, type: "ANIME" },
-                    keys: ["id", "idAnilist", "slug", "title", "episodes", "seasonYear", "sub", "dub"],
+                    // Keep this in sync with the working Animeya provider.
+                    // The API rejects unsupported projection keys such as "sub"/"dub".
+                    keys: ["id", "idAnilist", "slug", "title", "coverImage", "description", "episodes", "format", "seasonYear", "status"],
                 })
                 const media = (search?.medias || []).find((x: any) => Number(x?.idAnilist) === mediaId) || (search?.medias || [])[0]
                 if (!media?.slug) return []
