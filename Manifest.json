@@ -1,7 +1,7 @@
 {
   "id": "seasubs",
   "name": "SeaSubs",
-  "version": "0.5.3",
+  "version": "0.6.0",
   "manifestURI": "https://raw.githubusercontent.com/DefnoJae/SeaSubs/main/Manifest.json",
   "language": "typescript",
   "type": "plugin",
@@ -25,8 +25,8 @@
       "scopes": ["storage","playback"],
       "allow": {
         "networkAccess": {
-          "allowedDomains": ["animeya.cc","new.vidnest.fun","feed.animetosho.org","feed.animetosho.xyz","storage.animetosho.xyz","sub.wyzie.io","api.opensubtitles.com","*.opensubtitles.com"],
-          "reasoning": "SeaSubs checks Animeya for Forced / Signs & Songs tracks first, then AnimeTosho/AnimeTosho.xyz, with optional OpenSubtitles fallback."
+          "allowedDomains": ["animeya.cc","new.vidnest.fun","*.northernsummit.world","*.embermeadow.world","feed.animetosho.org","animetosho.org/storage/attach/","storage.animetosho.org/attach/","feed.animetosho.xyz","storage.animetosho.xyz","storage.animetosho.net/attachments/","api.opensubtitles.com","*.opensubtitles.com"],
+          "reasoning": "Read English subtitle content from Vidnest's observed subtitle CDNs and AnimeTosho attachments, including compressed XZ files, with optional OpenSubtitles fallback."
         }
       }
     }

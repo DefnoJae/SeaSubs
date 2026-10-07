@@ -1,0 +1,5 @@
+{
+  "private": true,
+  "scripts": { "build": "node scripts/build.cjs", "test": "node --test tests/*.test.cjs" },
+  "devDependencies": { "buffer": "6.0.3", "esbuild": "0.25.12", "typescript": "5.9.3", "xz-compat": "1.2.10" }
+}
