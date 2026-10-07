@@ -88,6 +88,7 @@ function init() {
         }
 
         async function search(): Promise<void> {
+            syncFromVideoCore()
             if (!title || !episode) {
                 ctx.toast.warning("SeaSubs: start an episode first so I know what to search for.")
                 return
@@ -146,20 +147,74 @@ function init() {
                 ctx.toast.error("SeaSubs: OpenSubtitles did not return a download link.")
                 return
             }
-            const conn = ctx.mpv.getConnection()
-            if (!conn || conn.isClosed()) {
-                ctx.toast.warning("SeaSubs found the subtitle, but direct loading currently requires Seanime's MPV-connected player.")
+            const label = "SeaSubs — " + labelFor(item)
+            const type = /\.ass(?:\?|$)/i.test(link) ? "ass" : /\.ssa(?:\?|$)/i.test(link) ? "ssa" : /\.vtt(?:\?|$)/i.test(link) ? "vtt" : "srt"
+
+            // Seanime v3.x VideoCore supports external subtitle injection for the
+            // built-in/torrent/online player. This makes the new track appear in
+            // the player's normal subtitle selector.
+            const playerType = ctx.videoCore.getCurrentPlayerType()
+            if (playerType) {
+                ctx.videoCore.addExternalSubtitleTrack({
+                    src: link,
+                    label,
+                    language: "en",
+                    type,
+                    default: true,
+                })
+                ctx.videoCore.showMessage("SeaSubs loaded: " + labelFor(item), 2500)
+                ctx.toast.success("SeaSubs: external subtitle added to the player.")
+                palette.close()
                 return
             }
-            conn.call("sub-add", link, "select", "SeaSubs — " + labelFor(item), "eng")
-            ctx.toast.success("SeaSubs: external subtitle loaded.")
-            palette.close()
+
+            // Fallback for classic MPV-connected playback.
+            const conn = ctx.mpv.getConnection()
+            if (conn && !conn.isClosed()) {
+                conn.call("sub-add", link, "select", label, "eng")
+                ctx.toast.success("SeaSubs: external subtitle loaded.")
+                palette.close()
+                return
+            }
+
+            ctx.toast.warning("SeaSubs found the subtitle, but no compatible active player was detected.")
         }
+
+        function syncFromVideoCore(): void {
+            const info = ctx.videoCore.getCurrentPlaybackInfo()
+            const media = ctx.videoCore.getCurrentMedia()
+            if (media?.title?.userPreferred) title = media.title.userPreferred
+            else if (media?.title?.english) title = media.title.english
+            else if (media?.title?.romaji) title = media.title.romaji
+
+            if (info?.onlinestreamParams?.episodeNumber) {
+                episode = Number(info.onlinestreamParams.episodeNumber)
+            } else if (info?.episode?.episodeNumber) {
+                episode = Number(info.episode.episodeNumber)
+            } else {
+                const playlist = ctx.videoCore.getPlaybackState()?.playbackInfo?.episode
+                if (playlist?.episodeNumber) episode = Number(playlist.episodeNumber)
+            }
+            tray.update()
+        }
+
+        ctx.videoCore.addEventListener("video-loaded", () => syncFromVideoCore())
+        ctx.videoCore.addEventListener("video-playback-state", () => syncFromVideoCore())
+        ctx.videoCore.addEventListener("video-playlist", (event) => {
+            const ep = event?.playlist?.currentEpisode?.episodeNumber
+            if (ep) episode = Number(ep)
+            syncFromVideoCore()
+        })
 
         ctx.playback.registerEventListener((event) => {
             if (event?.state?.mediaTitle) title = event.state.mediaTitle
             if (event?.state?.episodeNumber) episode = event.state.episodeNumber
+            tray.update()
         })
+
+        ctx.dom.onReady(() => syncFromVideoCore())
+        ctx.screen.onNavigate(() => syncFromVideoCore())
+        ctx.screen.loadCurrent()
 
         ctx.registerEventHandler("seasubs-search", () => { void search() })
 
