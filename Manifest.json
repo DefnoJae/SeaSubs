@@ -1,7 +1,7 @@
 {
   "id": "seasubs",
   "name": "SeaSubs",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "manifestURI": "https://raw.githubusercontent.com/DefnoJae/SeaSubs/main/Manifest.json",
   "language": "typescript",
   "type": "plugin",
