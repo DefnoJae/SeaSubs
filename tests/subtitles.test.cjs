@@ -7,7 +7,7 @@ const path = require('node:path');
 const root = path.resolve(__dirname, '..');
 const encoded = '/Td6WFoAAAFpIt42AgAhARYAAAB0L+Wj4AC2AJRdAC2UyMtHifLr5yTJxebCHSxfVkqNWXIPxgJIapMQKExT/N3Z7OVSi3s9v9hZrhfZR9YvoXRXW5inxLdC+ikFjefmBr0yuTyJ6GwfQEeYVLP8/aeVoeJLDN8QisM3Py8muktdEzfW4bM74QkR9bT1HFpprg0e/eEJGzWOqINlLHz2asmlOA9X/PqQltzB3gXOB81ygAAA1B/VhAABrAG3AQAA7DCMET4wDYsCAAAAAAFZWg==';
 function harness(fetch, storage = new Map()) {
-    const injected = [], messages = [], palette = {items: [], setItems(v) { this.items = v }, open() {}, close() {} };
+    const injected = [], messages = [], palette = {items: [], opens:0, visible:false, setItems(v) { this.items = v }, open() {this.opens++;this.visible=true}, close() {this.visible=false} };
     let playback = { id: 'episode-a', subtitleTracks: [], onlinestreamParams: { episodeNumber: 4, dubbed: true } };
     let media = {id:154692,title:{english:'Girlfriend, Girlfriend Season 2'}};
     const listeners = new Map(), handlers = new Map(), timers = new Map(); let nextTimer = 0;
@@ -27,7 +27,7 @@ function harness(fetch, storage = new Map()) {
     vm.createContext(rootSandbox);
     let code = fs.readFileSync(path.join(root,'code.ts'),'utf8');
     code = code.replace('ctx.registerEventHandler("seasubs-search",',
-        'globalThis.testHooks = {readCandidate,shiftSign,offsetTrack,parseDelay,animeDelay,applyAnimeDelay,openSignTiming,compareTiming, timingCues, unwrapProviderUrl, prepareTiming, rankTiming, loadCandidate, collectSubtitleAttachments, SeaSubsXZ, parseVtt, inferDubCompanion, deriveVtt, currentCandidates, runSearch, search, scheduleAuto, searchAnimeToshoHost, deriveSignsSongsAss, inspectCandidates, syncFromVideoCore, showCandidates, playbackKey}; ctx.registerEventHandler("seasubs-search",');
+        'globalThis.testHooks = {presentSearchResults,readCandidate,shiftSign,offsetTrack,parseDelay,animeDelay,applyAnimeDelay,openSignTiming,compareTiming, timingCues, unwrapProviderUrl, prepareTiming, rankTiming, loadCandidate, collectSubtitleAttachments, SeaSubsXZ, parseVtt, inferDubCompanion, deriveVtt, currentCandidates, runSearch, search, scheduleAuto, searchAnimeToshoHost, deriveSignsSongsAss, inspectCandidates, syncFromVideoCore, showCandidates, playbackKey}; ctx.registerEventHandler("seasubs-search",');
     vm.runInContext(ts.transpileModule(code, {compilerOptions:{target:ts.ScriptTarget.ES2018}}).outputText, rootSandbox);
     rootSandbox.init();
     // Seanime serializes the callback and evaluates it in a separate UI VM.
@@ -65,7 +65,7 @@ test('selecting generated signs retains alternatives on reopening instead of sho
     h.hooks.showCandidates(items,h.hooks.playbackKey());
     h.palette.items[0].onSelect();
     await new Promise(resolve => setImmediate(resolve));
-    await h.hooks.runSearch();
+    h.handle('seasubs-choose');
     assert.equal(h.palette.items[0].label,items[0].label);
     assert.equal(h.palette.items[1].label,items[1].label);
     assert.equal(h.palette.items[2].label,'Search other subtitle sources');
@@ -90,8 +90,9 @@ test('Episode 1 generated signs take three requests and bypass slow fallback sou
     h.sandbox.__ctx.fetch = async url => url === 'https://fixture.test/episode1.ass' ? (calls.push(url),response(poster)) : originalFetch(url);
     await h.hooks.runSearch();
     assert.equal(calls.length,3);
+    assert.equal(h.injected.length,1);assert.equal(h.palette.opens,0);
+    h.handle('seasubs-choose');
     assert.match(h.palette.items[0].label,/Generated Signs & Songs/);
-    h.palette.items[0].onSelect(); await new Promise(resolve => setImmediate(resolve));
     assert.match(h.injected[0].content,/Members Souper Wanted/);
 });
 const stamp = n => new Date(n * 1000).toISOString().slice(11,23);
@@ -324,8 +325,28 @@ function chooseInitial(h) {
 test('fast match uses one release and does not wait for Animeya or the alternate host', async () => {
     const calls=[],h=harness(fastSource(calls));
     await h.hooks.runSearch();
-    assert.equal(calls.length,3); assert.match(h.palette.items[0].label,/English Signs/);
+    assert.equal(calls.length,3); assert.equal(h.injected.length,1);assert.equal(h.palette.opens,0);
+    h.handle('seasubs-choose');assert.match(h.palette.items[0].label,/English Signs/);
     assert.ok(calls.every(url => !url.includes('animeya') && !url.includes('.xyz')));
+});
+test('unverified captions still require explicit selection after search completes', async () => {
+    const h=harness(),item={label:'Preview English',url:'',content:vtt(timingSample()),type:'vtt',language:'en',score:10,mode:'direct'};
+    await h.hooks.presentSearchResults([item],h.hooks.playbackKey());
+    assert.equal(h.injected.length,0);assert.equal(h.palette.visible,true);assert.equal(h.storage.size,0);
+    assert.ok(h.messages.some(m=>/search is complete/.test(m)));
+});
+test('wider search keeps verified alternatives selectable without silently changing tracks', async () => {
+    const h=harness(),item={label:'English Signs',url:'',content:timingAss(timingSample()),type:'ass',language:'en',score:1000,mode:'direct'};
+    await h.hooks.presentSearchResults([item],h.hooks.playbackKey(),false,true);
+    assert.equal(h.injected.length,0);assert.equal(h.palette.visible,true);
+});
+test('selecting an alternative dismisses picker immediately while its download is pending', async () => {
+    let finish;const h=harness(()=>new Promise(resolve=>{finish=resolve}));
+    h.hooks.showCandidates([{label:'Signs',url:'https://cdn.test/blocked.ass',type:'ass',language:'en',score:1000,mode:'direct'}],h.hooks.playbackKey());
+    assert.equal(h.palette.visible,true);h.palette.items[0].onSelect();assert.equal(h.palette.visible,false);
+    assert.equal(h.renderTray().find(i=>i.onClick==='seasubs-search').loading,true);
+    finish({ok:false,status:403});await new Promise(resolve=>setImmediate(resolve));
+    assert.equal(h.injected.length,0);assert.equal(h.renderTray().find(i=>i.onClick==='seasubs-search').loading,false);
 });
 test('choosing Signs enables next-episode auto loading, deduplicates events and caches revisits', async () => {
     const calls=[],h=harness(fastSource(calls));
@@ -384,8 +405,9 @@ test('live captured episode responses survive blocked VTT and inject the real 20
         throw Error('Unexpected request '+url);
     });
     await h.hooks.runSearch();
+    assert.equal(h.injected.length,1);assert.equal(h.palette.opens,0);
+    h.handle('seasubs-choose');
     assert.ok(h.palette.items.length); assert.match(h.palette.items[0].label,/English Signs/);
-    h.palette.items[0].onSelect();
     await new Promise(r => setImmediate(r));
     assert.equal(h.injected.length,1); assert.equal(h.injected[0].type,'ass');
     assert.equal((h.injected[0].content.match(/^Dialogue:/gm)||[]).length,20);

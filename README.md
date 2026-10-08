@@ -2,6 +2,13 @@
 
 Seanime plugin for external English Forced / Signs & Songs subtitles. Adds only subtitle tracks through VideoCore; preserves your current video provider, quality and audio.
 
+## v0.11.0 load first, choose alternatives separately
+
+- **Find external subtitles** searches and loads the first ranked readable signs track directly, without opening a selection dialog. Repeated Find uses the remembered selection when available. Loading and success feedback remain visible.
+- **Choose another subtitle** opens saved alternatives. Wider search keeps its results selectable. Selecting a result dismisses the picker immediately while the loading spinner covers its download; a failed download reports an error without replacing the current track.
+- Unverified captions still require explicit selection, with a message that the search is complete. No matching track means no automatic caption selection. Existing next-episode following and anime delay controls continue to apply.
+- Regression checks cover direct loading without opening a picker, retained alternatives, explicit unverified selection, wider searches and immediate picker dismissal during pending downloads.
+
 ## v0.10.1 download reuse and failed-track handling
 
 - Shares simultaneous subtitle reads and reuses successful downloads for five minutes, bounded to twelve cached files / eight million characters. Briefly caches failures for fifteen seconds; wider search retries failed reads. Selection no longer repeats downloads already completed during inspection.

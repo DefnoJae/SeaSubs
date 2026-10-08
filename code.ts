@@ -160,7 +160,7 @@ buffer/index.js:
         const API_KEY = "{{apiKey}}"
         const PREFER_FORCED = String("{{preferForced}}") !== "false"
         const API = "https://api.opensubtitles.com/api/v1"
-        const UA = "SeaSubs v0.10.1"
+        const UA = "SeaSubs v0.11.0"
 
         let title = ""
         let episode = 0
@@ -794,9 +794,7 @@ buffer/index.js:
             palette.open()
         }
 
-        function showCandidates(items: AnimeToshoResult[], key: string, automatic = false): void {
-            if (key !== playbackKey()) return
-            if (!automatic) {
+        function cacheResults(items: AnimeToshoResult[]): void {
                 resultLists[episodeKey()] = items.slice(0, 25)
                 if (Object.keys(resultLists).length > 6) delete resultLists[Object.keys(resultLists)[0]]
                 const keys = Object.keys(resultLists)
@@ -806,7 +804,33 @@ buffer/index.js:
                     size -= resultLists[older].reduce((n, i) => n + (i.content?.length || 0), 0)
                     delete resultLists[older]
                 }
+        }
+        async function presentSearchResults(items: AnimeToshoResult[], key: string, automatic = false, wider = false): Promise<void> {
+            if (key !== playbackKey()) return
+            if (!automatic) cacheResults(items)
+            if (!wider) {
+                const remembered = cachedTracks[episodeKey()]
+                const safe = (!automatic && remembered?.content ? remembered : undefined)
+                    || items.find(i => i.score >= 500 && i.mode === "direct" && !!i.content)
+                if (safe) { palette.close(); await loadCandidate({ ...safe, playback:key, automatic }); return }
+                if (automatic) {
+                    const derive = items.find(i => i.mode === "derive")
+                    if (derive && followPreference().enabled) { await loadCandidate({...derive,playback:key,automatic:true}); return }
+                }
             }
+            if (!automatic) ctx.toast.info("SeaSubs: choose a result to load it; the search is complete.")
+            showCandidates(items,key,automatic)
+        }
+        function chooseAnotherSubtitle(): void {
+            syncFromVideoCore()
+            const items = resultLists[episodeKey()]
+            if (!items?.length) { void search(false,true); return }
+            ctx.toast.info("SeaSubs: choose an alternative subtitle track.")
+            showCandidates(items,playbackKey())
+        }
+        function showCandidates(items: AnimeToshoResult[], key: string, automatic = false): void {
+            if (key !== playbackKey()) return
+            if (!automatic) cacheResults(items)
             if (automatic) {
                 const safe = items.find(i => i.score >= 500 && i.mode === "direct" && !!i.content)
                 if (safe) { void loadCandidate({ ...safe, playback: key, automatic: true }).catch(err => console.log("SeaSubs auto load failed", String(err))); return }
@@ -817,7 +841,7 @@ buffer/index.js:
             }
             palette.setItems(items.slice(0, 25).map((item, i) => ({ label: item.label, value: String(i),
                 heading: i === 0 ? "Subtitle tracks — unverified captions may contain dialogue" : undefined,
-                onSelect: () => { void loadCandidate({ ...item, playback: key }).catch(err => { console.log("SeaSubs load failed", String(err)); ctx.toast.error("SeaSubs: subtitle load failed.") }) } })).concat([{
+                onSelect: () => { if (key !== playbackKey()) return; palette.close(); void loadCandidate({ ...item, playback: key }).catch(err => { console.log("SeaSubs load failed", String(err)); ctx.toast.error("SeaSubs: subtitle load failed.") }) } })).concat([{
                     label: "Search other subtitle sources", value: "search-more", heading: "More options",
                     onSelect: () => { if (key === playbackKey()) void search(false, true) },
                 }]))
@@ -1113,9 +1137,9 @@ buffer/index.js:
             if (automatic && !followPreference().enabled) return
             const cached = cachedTracks[episodeKey()]
             const previous = resultLists[episodeKey()]
-            if (!automatic && !wider && previous) { showCandidates(previous, key); return }
+            if (!automatic && !wider && previous) { await presentSearchResults(previous,key); return }
             if (automatic && cached) {
-                showCandidates([cached], key, automatic)
+                await presentSearchResults([cached], key, automatic)
                 return
             }
 
@@ -1123,7 +1147,7 @@ buffer/index.js:
             syncFromVideoCore()
             if (key !== playbackKey()) return
             if (animeTosho.some(i => i.content && i.mode === "direct")) {
-                showCandidates(await rankTiming(animeTosho), key, automatic)
+                await presentSearchResults(await rankTiming(animeTosho), key, automatic, wider)
                 return
             }
             const sources = await Promise.all([currentCandidates(), searchAnimeyaForced()])
@@ -1131,7 +1155,7 @@ buffer/index.js:
             if (key !== playbackKey()) return
             const candidates = sources[0].concat(sources[1]).sort((a, b) => b.score - a.score)
             if (candidates.some(i => i.score >= 2000)) {
-                showCandidates(await rankTiming(candidates), key, automatic)
+                await presentSearchResults(await rankTiming(candidates), key, automatic, wider)
                 return
             }
             if (animeTosho.length) {
@@ -1148,12 +1172,12 @@ buffer/index.js:
                     ctx.toast.warning("SeaSubs: matching subtitles were found but could not be read; see log.")
                     return
                 }
-                showCandidates(await rankTiming(choices.concat(candidates)), key, automatic)
+                await presentSearchResults(await rankTiming(choices.concat(candidates)), key, automatic, wider)
                 return
             }
             if (candidates.length) {
                 ctx.toast.warning("SeaSubs: no verified Signs & Songs; dub captions are available to preview." + (unreadable ? " Some subtitle files could not be inspected (see log)." : ""))
-                showCandidates(candidates, key, automatic)
+                await presentSearchResults(candidates, key, automatic, wider)
                 return
             }
             if (!API_KEY || automatic) {
@@ -1185,7 +1209,7 @@ buffer/index.js:
                 label: labelFor(item),
                 value: String(index),
                 heading: index === 0 ? "Best matches" : undefined,
-                onSelect: () => { if (key === playbackKey()) void loadSubtitle(item, key) },
+                onSelect: () => { if (key === playbackKey()) { palette.close(); void loadSubtitle(item, key) } },
             })))
             palette.open()
         }
@@ -1303,6 +1327,7 @@ buffer/index.js:
         ctx.screen.loadCurrent()
 
         ctx.registerEventHandler("seasubs-search", () => { void search() })
+        ctx.registerEventHandler("seasubs-choose", () => chooseAnotherSubtitle())
         ctx.registerEventHandler("seasubs-sign-timing", () => openSignTiming())
         ctx.registerEventHandler("seasubs-delay-apply", () => {
             syncFromVideoCore()
@@ -1329,6 +1354,7 @@ buffer/index.js:
             tray.text(title && episode ? title + " — Episode " + episode : "Start an episode, then search."),
             tray.button(searching ? "Finding subtitles…" : loadingTracks ? "Loading subtitle…" : "Find external subtitles",
                 { onClick: "seasubs-search", intent: "primary", loading: searching || loadingTracks > 0, disabled: searching || loadingTracks > 0 }),
+            tray.button("Choose another subtitle", { onClick: "seasubs-choose", disabled: searching || loadingTracks > 0 }),
             tray.text("Subtitle delay for this anime: " + (animeDelay()/1000).toFixed(3) + " seconds"),
             tray.input({ label: "Delay (+ later / − earlier)", placeholder: "1.250 seconds, or 250ms", fieldRef: delayField }),
             tray.flex([
