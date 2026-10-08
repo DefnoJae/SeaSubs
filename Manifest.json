@@ -1,7 +1,7 @@
 {
   "id": "seasubs",
   "name": "SeaSubs",
-  "version": "0.12.0",
+  "version": "0.12.1",
   "icon": "https://raw.githubusercontent.com/DefnoJae/SeaSubs/main/marketplace-icon.png",
   "manifestURI": "https://raw.githubusercontent.com/DefnoJae/SeaSubs/main/Manifest.json",
   "language": "typescript",

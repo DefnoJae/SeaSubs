@@ -2,6 +2,11 @@
 
 Seanime plugin for external English Forced / Signs & Songs subtitles. Adds only subtitle tracks through VideoCore; preserves your current video provider, quality and audio.
 
+## v0.12.1 tray render fix
+
+- Converts native Seanime title/cover string wrappers into primitive strings before passing them to UI components. Fixes the `expected string, got *string` image error that repeatedly crashed the tray and interrupted the plugin.
+- Checks panel rendering with wrapped metadata and missing covers, alongside the subtitle regression suite. Also rendered the complete panel inside Seanime's exact Goja version using real Go `*string` metadata and strict image-prop validation.
+
 ## v0.12.0 redesigned native panel
 
 - Compact anime card, SeaSubs logo and wave header, a prominent gradient search action with native loading feedback, and a small link to retained alternatives.

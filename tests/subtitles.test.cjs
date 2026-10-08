@@ -15,7 +15,7 @@ function harness(fetch, storage = new Map()) {
     const fields = []; let trayRender, position = 10;
     const layout=(items,props)=>({items,...props});
     const tray = {update() {}, render(fn) {trayRender=fn},flex:layout,stack:layout,div:layout,
-        css:css=>({css}),img:props=>({image:props}),switch:props=>({switch:props}),
+        css:css=>({css}),img:props=>{assert.equal(typeof props.src,'string');if(props.alt!==undefined)assert.equal(typeof props.alt,'string');return {image:props}},switch:props=>({switch:props}),
         text:(text,props)=>({text,...props}),input:props=>({input:props}),button:(label,props)=>({label,...props})};
     const ctx = { fetch, newTray: () => tray, newCommandPalette: () => palette,
         fieldRef:value=>{let change;const ref={current:value,setValue(v){this.current=v},onValueChange(fn){change=fn},userChange(v){this.current=v;change?.(v)}};fields.push(ref);return ref},
@@ -41,12 +41,24 @@ function harness(fetch, storage = new Map()) {
     return { sandbox, hooks:sandbox.testHooks, palette, injected, messages, storage,
         fields,renderTree:()=>trayRender(),renderTray:()=>{const nodes=[];function walk(n){if(!n)return;if(Array.isArray(n)){n.forEach(walk);return}nodes.push(n);n.items?.forEach(walk)}walk(trayRender());return nodes},setPosition:value=>{position=value},
         observers,runDomReady:()=>domReady(),
+        setMedia:value=>{media=value},
         setTracks:tracks => {playback.subtitleTracks = tracks},
         change:(ep=4,mediaId=154692,dub=true) => {playback = {...playback,id:'episode-'+ep,onlinestreamParams:{episodeNumber:ep,dubbed:dub}}; media={...media,id:mediaId}},
         emit:name => listeners.get(name)?.({}), handle:name => handlers.get(name)?.(),
         flushTimers:() => {const fns=[...timers.values()]; timers.clear(); for(const fn of fns) fn()} };
 }
 const response = text => ({ok:true,status:200,text:() => text,json:() => JSON.parse(text)});
+test('tray renders wrapped metadata strings and missing covers with primitive image props', () => {
+    const h=harness();
+    h.setMedia({id:154692,title:{english:new String('Wrapped anime title')},coverImage:{large:new String('https://example.test/cover.jpg')},format:new String('TV')});
+    h.hooks.syncFromVideoCore();
+    const nodes=h.renderTray();
+    assert.equal(nodes.find(n=>n.image?.className==='ss-cover').image.src,'https://example.test/cover.jpg');
+    assert.equal(nodes.find(n=>n.image?.className==='ss-cover').image.alt,'Wrapped anime title');
+    assert.equal(nodes.find(n=>n.className==='ss-anime-title').text,'Wrapped anime title');
+    h.setMedia(undefined);h.hooks.syncFromVideoCore();
+    assert.match(h.renderTray().find(n=>n.image?.className==='ss-cover').image.src,/marketplace-icon.png$/);
+});
 test('slider adaptation is scoped, accessible, bounded and restores exact delays after expansion', () => {
     const h=harness();h.runDomReady();
     const writes=[],input={attributes:{},setAttribute(k,v){writes.push(k);this.attributes[k]=v},setProperty(k,v){this[k]=v}};

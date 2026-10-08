@@ -160,7 +160,7 @@ buffer/index.js:
         const API_KEY = "{{apiKey}}"
         const PREFER_FORCED = String("{{preferForced}}") !== "false"
         const API = "https://api.opensubtitles.com/api/v1"
-        const UA = "SeaSubs v0.12.0"
+        const UA = "SeaSubs v0.12.1"
 
         let title = ""
         let episode = 0
@@ -1282,9 +1282,9 @@ buffer/index.js:
             episode = 0
             dubbed = Boolean(info?.onlinestreamParams?.dubbed)
             if (media?.id) mediaId = Number(media.id)
-            if (media?.title?.userPreferred) title = media.title.userPreferred
-            else if (media?.title?.english) title = media.title.english
-            else if (media?.title?.romaji) title = media.title.romaji
+            if (media?.title?.userPreferred) title = String(media.title.userPreferred)
+            else if (media?.title?.english) title = String(media.title.english)
+            else if (media?.title?.romaji) title = String(media.title.romaji)
 
             if (info?.onlinestreamParams?.episodeNumber) {
                 episode = Number(info.onlinestreamParams.episodeNumber)
@@ -1313,7 +1313,7 @@ buffer/index.js:
         })
 
         ctx.playback.registerEventListener((event) => {
-            if (event?.state?.mediaTitle) title = event.state.mediaTitle
+            if (event?.state?.mediaTitle) title = String(event.state.mediaTitle)
             if (event?.state?.episodeNumber) episode = event.state.episodeNumber
             tray.update()
         })
@@ -1461,7 +1461,9 @@ buffer/index.js:
         `
         tray.render(() => {
             const media = ctx.videoCore.getCurrentMedia()
-            const cover = media?.coverImage?.large || media?.coverImage?.medium
+            // Goja exports Seanime metadata fields as native *string wrappers.
+            // Component props require JS primitives, even when TS says string.
+            const cover = String(media?.coverImage?.large || media?.coverImage?.medium || "")
             const busy = searching || loadingTracks > 0
             const ready = Boolean(mediaId && episode)
             return tray.stack([
