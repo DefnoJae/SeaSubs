@@ -11,7 +11,7 @@ function crc(b) {
 }
 function requireOk(ok, message) { if (!ok) throw new Error('XZ: ' + message); }
 export function decode(raw) {
-    requireOk(raw && raw.length >= 32 && raw.length <= 512 * 1024, 'input size');
+    requireOk(raw && raw.length >= 32 && raw.length <= 2 * 1024 * 1024, 'input size');
     const b = Buffer.from(raw);
     requireOk(b.slice(0, 6).toString('hex') === 'fd377a585a00' && b[6] === 0 && b[7] === 1, 'only CRC32 streams supported');
     requireOk(crc(b.slice(6, 8)) === b.readUInt32LE(8), 'header checksum');

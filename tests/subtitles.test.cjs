@@ -14,7 +14,7 @@ function harness(fetch, storage = new Map()) {
     const observers=new Map();let domReady;
     const fields = []; let trayRender, position = 10;
     const layout=(items,props)=>({items,...props});
-    const tray = {update() {}, render(fn) {trayRender=fn},flex:layout,stack:layout,div:layout,
+    const tray = {close() {palette.trayClosed=true},update() {}, render(fn) {trayRender=fn},flex:layout,stack:layout,div:layout,
         css:css=>({css}),img:props=>{assert.equal(typeof props.src,'string');if(props.alt!==undefined)assert.equal(typeof props.alt,'string');return {image:props}},switch:props=>({switch:props}),
         text:(text,props)=>({text,...props}),input:props=>({input:props}),button:(label,props)=>({label,...props})};
     const ctx = { fetch, newTray: () => tray, newCommandPalette: () => palette,
@@ -48,6 +48,17 @@ function harness(fetch, storage = new Map()) {
         flushTimers:() => {const fns=[...timers.values()]; timers.clear(); for(const fn of fns) fn()} };
 }
 const response = text => ({ok:true,status:200,text:() => text,json:() => JSON.parse(text)});
+test('manual injection dismisses tray and shows cue/source status; automatic injection leaves tray open', async () => {
+    const h=harness();
+    const track={label:'Publisher Forced',url:'',content:'1\n00:08:15,904 --> 00:08:22,578\nSTARE',type:'srt',language:'en',score:1000,mode:'direct',playback:h.hooks.playbackKey()};
+    await h.hooks.loadCandidate(track);
+    assert.equal(h.palette.trayClosed,true);
+    assert.match(h.renderTray().find(n=>n.className==='ss-status').text,/Sent to player · 1 cues/);
+    assert.match(h.renderTray().find(n=>n.className==='ss-source').text,/Publisher Forced/);
+    h.palette.trayClosed=false;
+    await h.hooks.loadCandidate({...track,automatic:true});assert.equal(h.palette.trayClosed,false);
+    h.change(5);h.hooks.syncFromVideoCore();assert.equal(h.renderTray().find(n=>n.className==='ss-status').text,'');
+});
 test('tray renders wrapped metadata strings and missing covers with primitive image props', () => {
     const h=harness();
     h.setMedia({id:154692,title:{english:new String('Wrapped anime title')},coverImage:{large:new String('https://example.test/cover.jpg')},format:new String('TV')});

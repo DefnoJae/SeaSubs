@@ -2,6 +2,12 @@
 
 Seanime plugin for external English Forced / Signs & Songs subtitles. Adds only subtitle tracks through VideoCore; preserves your current video provider, quality and audio.
 
+## v0.12.2 visible completion and selected source
+
+- Shows search/load status, the selected release and cue count in the panel. Successful manual loads dismiss the tray before showing the success toast; automatic following keeps it open. Clears status when playback changes.
+- Replaces the irregular automation icon with a clean settings symbol.
+- Accepts up to 2 MiB compressed XZ input while keeping the existing 2 MiB decoded-output bound. The failed Flower episode attachment in the user's log is 1,086,980 bytes compressed and 25,662,527 bytes decoded, with 43,518 drawing/animation events. It remains too large for this bounded reader; the loaded publisher forced SRT belongs to the correct episode and contains the screenshot's `STARE` cue. Timing remains unverified without a matching provider reference.
+
 ## v0.12.1 tray render fix
 
 - Converts native Seanime title/cover string wrappers into primitive strings before passing them to UI components. Fixes the `expected string, got *string` image error that repeatedly crashed the tray and interrupted the plugin.
@@ -105,7 +111,7 @@ The original AnimeTosho API does expose a working alternate source: release `586
 
 ## Limits and validation
 
-Observed Vidnest subtitle CDN domains are explicitly allowed; rotations can require a manifest update. XZ support intentionally accepts CRC32/LZMA2 only: maximum 512 KiB compressed input, 2 MiB output, 8 MiB dictionary, 16 blocks. Unsupported/corrupt streams fail visibly. ASS custom fonts are not downloaded, so rendering may substitute fonts.
+Observed Vidnest subtitle CDN domains are explicitly allowed; rotations can require a manifest update. XZ support intentionally accepts CRC32/LZMA2 only: maximum 2 MiB compressed input, 2 MiB output, 8 MiB dictionary, 16 blocks. Unsupported/corrupt streams fail visibly. ASS custom fonts are not downloaded, so rendering may substitute fonts.
 
 Tested with live API/attachment data, fifteen regression/replay checks and mocked VideoCore injection, including search request counts, next-episode following, saved preferences, pause, cached revisits and rapid skips. The real attachment also decoded byte for byte inside Seanime's exact Goja version after callback serialization into a fresh UI VM; native `*string` subtitle URIs and empty tracks were tested there too. The user confirmed v0.6.1 renders successfully; v0.7.0's automatic episode following remains to be checked in the user's player.
 

@@ -141,7 +141,7 @@ function init() {
         const API_KEY = "{{apiKey}}"
         const PREFER_FORCED = String("{{preferForced}}") !== "false"
         const API = "https://api.opensubtitles.com/api/v1"
-        const UA = "SeaSubs v0.12.1"
+        const UA = "SeaSubs v0.12.2"
 
         let title = ""
         let episode = 0
@@ -151,6 +151,8 @@ function init() {
         let mediaId = 0
         let dubbed = false
         let searching = false
+        let searchStatus = ""
+        let statusPlayback = ""
         let loadingTracks = 0
         let unreadable = 0
         let pendingAuto = false
@@ -684,6 +686,7 @@ function init() {
 
         async function loadCandidate(item: AnimeToshoResult): Promise<void> {
             loadingTracks++
+            searchStatus = "Downloading and preparing subtitle…"
             tray.update()
             try { await loadCandidateImpl(item) }
             finally { loadingTracks--; tray.update() }
@@ -698,7 +701,7 @@ function init() {
                 syncFromVideoCore()
                 if (item.playback !== playbackKey()) return
                 if (item.automatic && !followPreference().enabled) return
-                if (!item.content) { ctx.toast.error("SeaSubs: this subtitle could not be downloaded or read. Choose another source; details are in the log."); return }
+                if (!item.content) { searchStatus = "Could not read this track. Choose another subtitle."; ctx.toast.error("SeaSubs: this subtitle could not be downloaded or read. Choose another source; details are in the log."); return }
             }
             if (item.content) {
                 item = await prepareTiming(item)
@@ -706,6 +709,11 @@ function init() {
                 if (item.playback !== playbackKey() || (item.automatic && !followPreference().enabled)) return
                 emitSubtitle(item)
                 activeSubtitle = { ...item }
+                const cues = item.type === "srt" ? (item.content.match(/\d{2}:\d{2}:\d{2},\d{3}\s+-->/g) || []).length : timingCues(item.content).length
+                searchStatus = "Sent to player · " + cues + " cues" + (item.timingMatched ? " · timing compared" : " · timing unverified")
+                // Toasts can sit behind Seanime's open tray. Dismiss only after
+                // an explicit selection has been injected, never during auto-follow.
+                if (!item.automatic) tray.close()
                 ctx.toast.success("SeaSubs: subtitle track added.")
                 palette.close()
             }
@@ -1100,12 +1108,14 @@ function init() {
             if (wider) timingReference = undefined
             if (wider) for (const key of Object.keys(subtitleReads)) if (!subtitleReads[key].size) delete subtitleReads[key]
             searching = true
+            searchStatus = "Searching subtitle sources…"
             tray.update()
             unreadable = 0
             try { await runSearch(automatic, wider) }
-            catch (err) { console.log("SeaSubs search failed", String(err)); ctx.toast.error("SeaSubs: search failed; see log.") }
+            catch (err) { searchStatus = "Search failed. Try again or choose another source."; console.log("SeaSubs search failed", String(err)); ctx.toast.error("SeaSubs: search failed; see log.") }
             finally {
                 searching = false
+                if (searchStatus === "Searching subtitle sources…") searchStatus = "Search complete. Choose a result if available."
                 tray.update()
                 if (pendingAuto) { pendingAuto = false; scheduleAuto() }
             }
@@ -1281,6 +1291,7 @@ function init() {
                 sliderField.setValue((animeDelay()/1000).toFixed(3))
                 followField.setValue(followPreference().enabled)
             }
+            if (statusPlayback !== playbackKey()) { statusPlayback = playbackKey(); searchStatus = "" }
             tray.update()
         }
 
@@ -1378,7 +1389,7 @@ function init() {
                 search:'<circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/>',
                 clock:'<circle cx="12" cy="13" r="8"/><path d="M12 9v4l2 2M9 2h6M12 2v3"/>',
                 sign:'<path d="m12 3 2.5 6.5L21 12l-6.5 2.5L12 21l-2.5-6.5L3 12l6.5-2.5Z"/>',
-                settings:'<path d="m9 3-1 3-3 1-2 3 2 2-1 3 3 2 3-1 2 2 3-1 1-3 3-1 2-3-2-2 1-3-3-2-3 1-2-2Z"/><circle cx="12" cy="11" r="3"/>',
+                settings:'<circle cx="12" cy="12" r="7"/><circle cx="12" cy="12" r="3"/><path d="M12 2v3m0 14v3M2 12h3m14 0h3M5 5l2 2m10 10 2 2M5 19l2-2M17 7l2-2"/>',
                 chevron:'<path d="m9 5 7 7-7 7"/>',
             }
             return "data:image/svg+xml," + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#e8eaff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">'+paths[name]+'</svg>')
@@ -1432,12 +1443,17 @@ function init() {
             .ss-feature button {flex-shrink:0;height:33px;padding:5px 13px;font-size:11px}
             .ss-auto-on {background:radial-gradient(ellipse at 100% 100%,#512ba930,transparent 65%),#0c111b;border-color:#55418d;box-shadow:0 0 18px #693aff12}
             .ss-toggle {flex-shrink:0;width:42px!important;margin:0!important}
+            .ss-toggle .UI-Switch__container {gap:0!important;justify-content:flex-end}
+            .ss-toggle .UI-Switch__container > div {display:none}
             .ss-toggle label {font-size:0!important;width:0!important;margin:0!important}
             .ss-toggle button {width:40px!important;height:23px!important;border-radius:20px!important;background:#30364c!important;border-color:#444b68!important;padding:2px!important}
             .ss-toggle button[data-state="checked"],.ss-toggle button[aria-checked="true"] {background:#6538f5!important;border-color:#8867ff!important;box-shadow:0 0 14px #693aff44}
             .ss-toggle button span {width:17px!important;height:17px!important;background:#eeeaff;border-radius:50%;transform:translateX(0)!important}
             .ss-toggle button[data-state="checked"] span {transform:translateX(15px)!important}
             .ss-shortcut {font-size:10px;color:#697a9b;text-align:center}
+            .ss-status {font-size:11px;color:#bbb5e9;line-height:1.4}
+            .ss-source {font-size:10px;color:#91a1bf;line-height:1.4;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+            .ss-status:empty,.ss-source:empty {display:none}
             @media(max-width:440px) {.ss-panel{padding:9px}.ss-sub{font-size:10px}.ss-heading{font-size:12px}.ss-feature{gap:8px}.ss-find::after{font-size:10px}.ss-panel .ss-find{font-size:16px}.ss-logo{width:46px;height:46px}.ss-title{font-size:25px}.ss-feature button{padding:4px 9px}}
         `
         tray.render(() => {
@@ -1463,6 +1479,8 @@ function init() {
                     ],{className:"ss-card ss-anime"}),
                     tray.button(searching ? "Finding subtitles…" : loadingTracks ? "Loading subtitle…" : "Find external subtitles",{onClick:"seasubs-search",intent:"primary",loading:busy,disabled:busy,className:"ss-find"+(busy ? " ss-busy" : ""),style:{backgroundImage:'url("'+icon("chevron")+'"), radial-gradient(ellipse at 100% 0%,#b47aff80,transparent 52%),linear-gradient(115deg,#4930f4,#293eed 60%,#753eff)',backgroundPosition:"right 15px center,center,center",backgroundSize:"17px,auto,auto",backgroundRepeat:"no-repeat"}}),
                     tray.button("Choose another subtitle ›",{onClick:"seasubs-choose",disabled:busy,className:"ss-alternatives"}),
+                    tray.text(searchStatus,{className:"ss-status"}),
+                    tray.text(activeSubtitle?.playback === playbackKey() ? activeSubtitle.label : "",{className:"ss-source"}),
                     tray.div([
                         tray.div([
                             tray.img({src:icon("clock"),alt:"",className:"ss-icon"}),
