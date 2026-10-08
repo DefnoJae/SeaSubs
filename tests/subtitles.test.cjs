@@ -11,10 +11,13 @@ function harness(fetch, storage = new Map()) {
     let playback = { id: 'episode-a', subtitleTracks: [], onlinestreamParams: { episodeNumber: 4, dubbed: true } };
     let media = {id:154692,title:{english:'Girlfriend, Girlfriend Season 2'}};
     const listeners = new Map(), handlers = new Map(), timers = new Map(); let nextTimer = 0;
-    const ctx = { fetch, newTray: () => ({update() {}, render() {}}), newCommandPalette: () => palette,
+    const fields = []; let trayRender, position = 10;
+    const tray = {update() {}, render(fn) {trayRender=fn},flex:items=>({items}),stack:items=>items,text:text=>({text}),input:props=>({input:props}),button:(label,props)=>({label,...props})};
+    const ctx = { fetch, newTray: () => tray, newCommandPalette: () => palette,
+        fieldRef:value=>{const ref={current:value,setValue(v){this.current=v}};fields.push(ref);return ref},
         toast: Object.fromEntries(['success','warning','error','info'].map(k => [k, x => messages.push(x)])),
         videoCore: { getCurrentPlaybackInfo: () => playback, getCurrentMedia: () => media,
-            getPlaybackState: () => ({playbackInfo:playback}), addExternalSubtitleTrack: t => injected.push(t), showMessage() {}, addEventListener:(name,fn) => listeners.set(name,fn) },
+            getPlaybackStatus:()=>({currentTime:position}),getPlaybackState: () => ({playbackInfo:playback}), addExternalSubtitleTrack: t => injected.push(t), showMessage() {}, addEventListener:(name,fn) => listeners.set(name,fn) },
         playback:{ registerEventListener() {} }, dom:{ onReady() {} }, screen:{ onNavigate() {}, loadCurrent() {} },
         anime:{ getAnimeMetadata: async () => ({episodes:{4:{anidbId:271605},5:{anidbId:271606},6:{anidbId:271607}}}) },
         setTimeout:(fn) => {const id = ++nextTimer; timers.set(id,fn); return () => timers.delete(id)},
@@ -24,7 +27,7 @@ function harness(fetch, storage = new Map()) {
     vm.createContext(rootSandbox);
     let code = fs.readFileSync(path.join(root,'code.ts'),'utf8');
     code = code.replace('ctx.registerEventHandler("seasubs-search",',
-        'globalThis.testHooks = {compareTiming, timingCues, unwrapProviderUrl, prepareTiming, rankTiming, loadCandidate, collectSubtitleAttachments, SeaSubsXZ, parseVtt, inferDubCompanion, deriveVtt, currentCandidates, runSearch, search, scheduleAuto, searchAnimeToshoHost, deriveSignsSongsAss, inspectCandidates, syncFromVideoCore, showCandidates, playbackKey}; ctx.registerEventHandler("seasubs-search",');
+        'globalThis.testHooks = {shiftSign,offsetTrack,parseDelay,animeDelay,applyAnimeDelay,openSignTiming,compareTiming, timingCues, unwrapProviderUrl, prepareTiming, rankTiming, loadCandidate, collectSubtitleAttachments, SeaSubsXZ, parseVtt, inferDubCompanion, deriveVtt, currentCandidates, runSearch, search, scheduleAuto, searchAnimeToshoHost, deriveSignsSongsAss, inspectCandidates, syncFromVideoCore, showCandidates, playbackKey}; ctx.registerEventHandler("seasubs-search",');
     vm.runInContext(ts.transpileModule(code, {compilerOptions:{target:ts.ScriptTarget.ES2018}}).outputText, rootSandbox);
     rootSandbox.init();
     // Seanime serializes the callback and evaluates it in a separate UI VM.
@@ -32,8 +35,9 @@ function harness(fetch, storage = new Map()) {
     vm.runInContext('(' + callback + ').call(undefined, __ctx)', sandbox);
     sandbox.testHooks.syncFromVideoCore();
     return { sandbox, hooks:sandbox.testHooks, palette, injected, messages, storage,
+        fields,renderTray:()=>trayRender(),setPosition:value=>{position=value},
         setTracks:tracks => {playback.subtitleTracks = tracks},
-        change:(ep=4,mediaId=154692) => {playback = {...playback,id:'episode-'+ep,onlinestreamParams:{episodeNumber:ep,dubbed:true}}; media={...media,id:mediaId}},
+        change:(ep=4,mediaId=154692,dub=true) => {playback = {...playback,id:'episode-'+ep,onlinestreamParams:{episodeNumber:ep,dubbed:dub}}; media={...media,id:mediaId}},
         emit:name => listeners.get(name)?.({}), handle:name => handlers.get(name)?.(),
         flushTimers:() => {const fns=[...timers.values()]; timers.clear(); for(const fn of fns) fn()} };
 }
@@ -97,6 +101,59 @@ const timingSample = () => [
     {start:110,end:112,text:'Library opens tomorrow'}, {start:160,end:162,text:'Keep the hallway quiet'},
     {start:210,end:212,text:'Unmatched source translation'}];
 const timingAss = cues => '[Script Info]\nScriptType: v4.00+\n[V4+ Styles]\nStyle: Signs,Arial,20\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n' + cues.map(c => `Dialogue: 0,${stamp(c.start).replace(/^00:/,'0:').slice(0,-1)},${stamp(c.end).replace(/^00:/,'0:').slice(0,-1)},Signs,,0,0,0,,{\\pos(100,200)}${c.text}`).join('\n');
+test('anime delay accepts seconds and milliseconds, persists by anime/dub, and never compounds', async () => {
+    const h=harness(),content=timingAss(timingSample());
+    assert.equal(h.hooks.parseDelay('1.250'),1250);assert.equal(h.hooks.parseDelay('-250ms'),-250);
+    assert.equal(h.hooks.parseDelay('1ms'),1);assert.equal(h.hooks.parseDelay('junk'),undefined);assert.equal(h.hooks.parseDelay('121'),undefined);
+    await h.hooks.loadCandidate({label:'Signs',url:'',content,type:'ass',language:'en',score:1000,mode:'direct',playback:h.hooks.playbackKey()});
+    h.fields[0].setValue('1.250');h.handle('seasubs-delay-apply');
+    assert.equal(h.hooks.timingCues(h.injected.at(-1).content)[0].start,11.25);
+    h.handle('seasubs-delay-apply');assert.equal(h.hooks.timingCues(h.injected.at(-1).content)[0].start,11.25);
+    h.handle('seasubs-delay-plus');assert.equal(h.hooks.timingCues(h.injected.at(-1).content)[0].start,11.35);
+    h.handle('seasubs-delay-minus');assert.equal(h.hooks.timingCues(h.injected.at(-1).content)[0].start,11.25);
+    const reloaded=harness(undefined,h.storage);assert.equal(reloaded.hooks.animeDelay(),1250);assert.equal(reloaded.fields[0].current,'1.250');
+    reloaded.change(5);reloaded.hooks.syncFromVideoCore();assert.equal(reloaded.hooks.animeDelay(),1250);
+    reloaded.change(5,154692,false);reloaded.hooks.syncFromVideoCore();assert.equal(reloaded.hooks.animeDelay(),0);
+    reloaded.change(1,10165);reloaded.hooks.syncFromVideoCore();assert.equal(reloaded.hooks.animeDelay(),0);
+    h.handle('seasubs-delay-reset');assert.equal(h.hooks.timingCues(h.injected.at(-1).content)[0].start,10);
+});
+test('global offsets preserve drawing events and support VTT/SRT millisecond timing', () => {
+    const h=harness(), ass=timingAss([{start:1,end:3,text:'{\\p1}m 0 0 l 10 10'}]);
+    assert.match(h.hooks.offsetTrack(ass,250),/0:00:01.25,0:00:03.25/);assert.match(h.hooks.offsetTrack(ass,250),/\\p1/);
+    assert.match(h.hooks.offsetTrack(vtt([{start:1,end:3,text:'Caption'}]),1),/00:00:01.001 --> 00:00:03.001/);
+    assert.match(h.hooks.offsetTrack('1\n00:00:01,000 --> 00:00:03,000\nCaption',-250),/00:00:00,750 --> 00:00:02,750/);
+    assert.ok(!h.hooks.offsetTrack(ass,-4000).includes('Dialogue:'));
+});
+test('per-sign editing moves only the chosen cue and combines with the anime offset', async () => {
+    const h=harness(),content=timingAss(timingSample());
+    await h.hooks.loadCandidate({label:'Signs',url:'https://example/signs.ass',content,type:'ass',language:'en',score:1000,mode:'direct',playback:h.hooks.playbackKey()});
+    h.hooks.applyAnimeDelay(1250);h.setPosition(11.5);h.handle('seasubs-sign-timing');
+    assert.match(h.palette.items[0].label,/School entrance sign/);h.palette.items[0].onSelect();
+    h.palette.items.find(i=>i.value==='0.5').onSelect();
+    assert.deepEqual(Array.from(h.hooks.timingCues(h.injected.at(-1).content),c=>c.start),[11.75,51.25,111.25,161.25,211.25]);
+    h.hooks.applyAnimeDelay(0);assert.deepEqual(Array.from(h.hooks.timingCues(h.injected.at(-1).content),c=>c.start),[10.5,50,110,160,210]);
+    assert.equal(h.hooks.shiftSign(content,h.hooks.timingCues(content)[0],-11).changed,0);
+});
+test('stale sign editor cannot change another episode', async () => {
+    const h=harness();await h.hooks.loadCandidate({label:'Signs',url:'',content:timingAss(timingSample()),type:'ass',language:'en',score:1000,mode:'direct',playback:h.hooks.playbackKey()});
+    h.handle('seasubs-sign-timing');h.palette.items[0].onSelect();const later=h.palette.items.find(i=>i.value==='1');
+    h.change(5);later.onSelect();assert.equal(h.injected.length,1);
+});
+test('search spinner blocks duplicate requests and clears after failure', async () => {
+    const h=harness(async()=>{throw Error('blocked')});let finish;
+    h.sandbox.__ctx.anime.getAnimeMetadata=()=>new Promise(resolve=>{finish=resolve});
+    const pending=h.hooks.search();
+    let button=h.renderTray().find(i=>i.onClick==='seasubs-search');assert.equal(button.loading,true);assert.equal(button.disabled,true);
+    await h.hooks.search();finish({episodes:{}});await pending;
+    button=h.renderTray().find(i=>i.onClick==='seasubs-search');assert.equal(button.loading,false);assert.equal(button.disabled,false);
+});
+test('track download spinner clears when compressed subtitle download fails', async () => {
+    const h=harness();let finish;h.sandbox.__ctx.fetch=()=>new Promise(resolve=>{finish=resolve});
+    const pending=h.hooks.loadCandidate({label:'Signs',url:'https://cdn.test/subtitle.ass.xz',type:'ass',language:'en',score:1000,mode:'direct',playback:h.hooks.playbackKey()});
+    assert.equal(h.renderTray().find(i=>i.onClick==='seasubs-search').loading,true);
+    finish({ok:false,status:403});await pending;
+    assert.equal(h.renderTray().find(i=>i.onClick==='seasubs-search').loading,false);assert.equal(h.injected.length,0);
+});
 test('timing comparison fixes only matching early cues and preserves correct and unmatched ASS cues', () => {
     const h = harness(), cues = timingSample();
     const reference = cues.slice(0,4).map((c,i) => ({...c,start:c.start+(i===0||i===2?1:0),end:c.end+(i===0||i===2?1:0)}));

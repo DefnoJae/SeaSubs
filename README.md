@@ -2,6 +2,14 @@
 
 Seanime plugin for external English Forced / Signs & Songs subtitles. Adds only subtitle tracks through VideoCore; preserves your current video provider, quality and audio.
 
+## v0.10.0 manual timing and loading feedback
+
+- The tray accepts an exact anime delay in seconds (`1.250`, `-0.250`) or milliseconds (`250ms`), with Apply, Later +100ms, Earlier −100ms and Reset buttons. Positive values show subtitles later. Saves the delay per anime and sub/dub mode, applies it to following episodes and restores it after reload. Limit: ±120 seconds.
+- Applies delays from the unshifted SeaSubs content every time, preserving ASS styles/drawings and VTT settings. ASS/SSA uses its native centisecond precision; VTT/SRT timing supports milliseconds. Changes affect only readable SeaSubs tracks, not the original video/audio or Seanime's own delay setting.
+- For mixed timing, pause near an affected sign and choose **Adjust one subtitle's timing**. Pick the sign, then move it earlier/later by 0.5 or 1 second; other signs stay unchanged. These individual edits remain in the bounded episode cache for this session and combine with the saved anime delay. They are not saved across reloads. Moving a sign before zero is rejected.
+- Shows Seanime's circular spinner beside the find button during searches and selected-track downloads, disables the button while busy, and clears loading on completion/failure.
+- Tested saved delays, anime/dub isolation, reset, repeated application, format preservation, individual corrections, stale editors and loading cleanup alongside existing subtitle regressions.
+
 ## v0.9.0 provider timing comparison
 
 - Compares readable ASS/SSA and VTT candidate cues with the current provider's original English captions. Prioritizes compared matches among available results and labels timing as matching, adjusted, or unverified.

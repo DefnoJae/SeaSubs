@@ -42,7 +42,7 @@ function init() {
         }
 
         type TimingCue = { start: number, end: number, text: string, line: number, fields?: string[], startIndex?: number, endIndex?: number }
-        function timingCues(content: string): TimingCue[] {
+        function timingCues(content: string, includeDrawings = false): TimingCue[] {
             const vtt = parseVtt(content)
             if (vtt.length) return vtt.map((c, i) => ({ ...c, line: i }))
             const out: TimingCue[] = []
@@ -57,7 +57,7 @@ function init() {
                 if (startIndex < 0 || endIndex < 0 || textIndex < 0) return
                 const stamp = (s: string) => s.trim().split(":").reduce((n, v) => n * 60 + Number(v), 0)
                 const start = stamp(fields[startIndex]), end = stamp(fields[endIndex])
-                if (Number.isFinite(start) && end > start && !/\\p[1-9]/.test(fields[textIndex])) out.push({ start, end, text: stripAssTags(fields[textIndex]), line: index, fields, startIndex, endIndex })
+                if (Number.isFinite(start) && end > start && (includeDrawings || !/\\p[1-9]/.test(fields[textIndex]))) out.push({ start, end, text: stripAssTags(fields[textIndex]), line: index, fields, startIndex, endIndex })
             })
             return out
         }
@@ -141,7 +141,7 @@ function init() {
         const API_KEY = "{{apiKey}}"
         const PREFER_FORCED = String("{{preferForced}}") !== "false"
         const API = "https://api.opensubtitles.com/api/v1"
-        const UA = "SeaSubs v0.9.0"
+        const UA = "SeaSubs v0.10.0"
 
         let title = ""
         let episode = 0
@@ -151,12 +151,78 @@ function init() {
         let mediaId = 0
         let dubbed = false
         let searching = false
+        let loadingTracks = 0
         let unreadable = 0
         let pendingAuto = false
         let autoAttemptedKey = ""
         let autoCancel: (() => void) | undefined
         let autoScheduledKey = ""
         const cachedTracks: Record<string, AnimeToshoResult> = {}
+        let activeSubtitle: AnimeToshoResult | undefined
+        const animeDelays: Record<string, number> = {}
+        const delayField = ctx.fieldRef("0.000")
+        let delayFieldAnime = ""
+        function animeDelay(): number {
+            const key = seriesKey()
+            if (animeDelays[key] === undefined) {
+                let saved = 0
+                try { saved = Number($storage.get<number>("timing-delay-" + key) || 0) } catch (_) { }
+                animeDelays[key] = Number.isFinite(saved) && Math.abs(saved) <= 120000 ? Math.round(saved) : 0
+            }
+            return animeDelays[key]
+        }
+        function parseDelay(value: string): number | undefined {
+            const match = value.trim().match(/^([+-]?(?:\d+(?:\.\d+)?|\.\d+))\s*(ms|s|seconds?|milliseconds?)?$/i)
+            if (!match) return undefined
+            const milliseconds = Math.round(Number(match[1]) * (/^(ms|milliseconds?)$/i.test(match[2] || "") ? 1 : 1000))
+            return Number.isFinite(milliseconds) && Math.abs(milliseconds) <= 120000 ? milliseconds : undefined
+        }
+        function offsetTrack(content: string, milliseconds: number): string {
+            if (!milliseconds) return content
+            const delta = milliseconds / 1000
+            const stamp = (s: number, ass: boolean) => {
+                const units = ass ? 100 : 1000, ticks = Math.max(0,Math.round(s * units)), whole = Math.floor(ticks / units)
+                return (ass ? String(Math.floor(whole / 3600)) : String(Math.floor(whole / 3600)).padStart(2,"0")) + ":" + String(Math.floor(whole / 60) % 60).padStart(2,"0") + ":" + String(whole % 60).padStart(2,"0") + "." + String(ticks % units).padStart(ass ? 2 : 3,"0")
+            }
+            const vtt = parseVtt(content)
+            if (vtt.length) {
+                const replacements: Record<string,string> = Object.create(null)
+                for (const cue of vtt) replacements[cue.block] = cue.end + delta <= 0 ? "" : cue.block.replace(/((?:\d{2,}:)?\d{2}:\d{2}\.\d{3})\s+-->\s+((?:\d{2,}:)?\d{2}:\d{2}\.\d{3})/,stamp(cue.start + delta,false)+" --> "+stamp(cue.end + delta,false))
+                return content.replace(/^\uFEFF/,"").replace(/\r\n?/g,"\n").split(/\n\s*\n/).map(b => replacements[b] === undefined ? b : replacements[b]).filter(Boolean).join("\n\n")
+            }
+            const cues = timingCues(content,true), lines = content.replace(/^\uFEFF/,"").split(/\r?\n/)
+            for (const cue of cues) {
+                if (cue.end + delta <= 0) { lines[cue.line] = ""; continue }
+                const fields = cue.fields!.slice()
+                fields[cue.startIndex!] = stamp(cue.start + delta,true); fields[cue.endIndex!] = stamp(cue.end + delta,true)
+                lines[cue.line] = "Dialogue:" + fields.join(",")
+            }
+            if (cues.length) return lines.join("\r\n")
+            // Plain SRT keeps its numbering/text; adjust only timing lines.
+            const seconds = (s: string) => s.replace(",",".").split(":").reduce((n,p) => n*60+Number(p),0)
+            return content.replace(/^\uFEFF/,"").replace(/\r\n?/g,"\n").split(/\n\s*\n/).map(block => {
+                const match = block.match(/^(\d{2,}:\d{2}:\d{2},\d{3})\s+-->\s+(\d{2,}:\d{2}:\d{2},\d{3})(.*)$/m)
+                if (!match) return block
+                if (seconds(match[2]) + delta <= 0) return ""
+                return block.replace(match[0],stamp(seconds(match[1])+delta,false).replace(".",",")+" --> "+stamp(seconds(match[2])+delta,false).replace(".",",")+match[3])
+            }).filter(Boolean).join("\n\n")
+        }
+        function emitSubtitle(item: AnimeToshoResult): void {
+            const delay = animeDelay()
+            ctx.videoCore.addExternalSubtitleTrack({ content: offsetTrack(item.content!,delay),
+                label: "SeaSubs — " + item.label + (delay ? " (delay " + (delay > 0 ? "+" : "") + (delay/1000).toFixed(3) + "s)" : ""),
+                language: item.language, type: item.type as "vtt" | "ass" | "ssa" | "srt", default: true })
+        }
+        function applyAnimeDelay(milliseconds: number): void {
+            syncFromVideoCore()
+            if (!mediaId || !episode) { ctx.toast.warning("SeaSubs: start an episode first."); return }
+            animeDelays[seriesKey()] = milliseconds
+            try { $storage.set("timing-delay-" + seriesKey(),milliseconds) } catch (err) { console.log("SeaSubs delay save failed",String(err)) }
+            delayField.setValue((milliseconds/1000).toFixed(3))
+            if (activeSubtitle?.content && activeSubtitle.playback === playbackKey()) emitSubtitle(activeSubtitle)
+            tray.update()
+            ctx.toast.success("SeaSubs: saved delay for this anime: " + (milliseconds/1000).toFixed(3) + "s.")
+        }
         const resultLists: Record<string, AnimeToshoResult[]> = {}
         const cacheOrder: string[] = []
         const feedCache: Record<string, { time: number, rows: any[] }> = {}
@@ -272,6 +338,7 @@ function init() {
             timingKey?: string
             fetchHeaders?: Record<string, string>
             fetchTimeout?: number
+            manualTiming?: boolean
         }
 
         let timingReferenceKey = "", timingReference: Promise<string> | undefined
@@ -314,6 +381,7 @@ function init() {
         }
 
         async function prepareTiming(item: AnimeToshoResult): Promise<AnimeToshoResult> {
+            if (item.manualTiming) return item
             if (!item.content || item.mode === "derive") return item
             const key = playbackKey()
             if (item.timingKey === key) return item
@@ -503,6 +571,7 @@ function init() {
         }
 
         function injectExternal(src: string, label: string, language: string, type: string): void {
+            activeSubtitle = undefined
             ctx.videoCore.addExternalSubtitleTrack({ src, label: "SeaSubs — " + label, language, type: type as "ass" | "ssa" | "vtt" | "srt", default: true })
             ctx.videoCore.showMessage("SeaSubs loaded: " + label, 2500)
             ctx.toast.success("SeaSubs: external subtitle added to the player.")
@@ -582,6 +651,12 @@ function init() {
         }
 
         async function loadCandidate(item: AnimeToshoResult): Promise<void> {
+            loadingTracks++
+            tray.update()
+            try { await loadCandidateImpl(item) }
+            finally { loadingTracks--; tray.update() }
+        }
+        async function loadCandidateImpl(item: AnimeToshoResult): Promise<void> {
             syncFromVideoCore()
             if (item.playback !== playbackKey()) { ctx.toast.warning("SeaSubs: episode changed; search again."); return }
             if (item.automatic && !followPreference().enabled) return
@@ -597,8 +672,8 @@ function init() {
                 item = await prepareTiming(item)
                 syncFromVideoCore()
                 if (item.playback !== playbackKey() || (item.automatic && !followPreference().enabled)) return
-                ctx.videoCore.addExternalSubtitleTrack({ content: item.content, label: "SeaSubs — " + item.label,
-                    language: item.language, type: item.type as "vtt" | "ass" | "ssa" | "srt", default: true })
+                emitSubtitle(item)
+                activeSubtitle = { ...item }
                 ctx.toast.success("SeaSubs: subtitle track added.")
                 palette.close()
             } else {
@@ -606,6 +681,73 @@ function init() {
                 injectExternal(item.url, item.label, item.language, item.type)
             }
             rememberChoice(item)
+        }
+
+        function shiftSign(content: string, selected: TimingCue, seconds: number): { content: string, changed: number } {
+            const cues = timingCues(content)
+            const matches = cues.filter(c => cueText(c.text) === cueText(selected.text)
+                && Math.abs(c.start - selected.start) < 0.05 && Math.abs(c.end - selected.end) < 0.05)
+            if (!matches.length || selected.start + seconds < 0) return { content, changed: 0 }
+            const stamp = (s: number, ass: boolean) => {
+                const units = ass ? 100 : 1000, ticks = Math.round(s * units), whole = Math.floor(ticks / units)
+                return (ass ? String(Math.floor(whole / 3600)) : String(Math.floor(whole / 3600)).padStart(2,"0")) + ":"
+                    + String(Math.floor(whole / 60) % 60).padStart(2,"0") + ":" + String(whole % 60).padStart(2,"0") + "." + String(ticks % units).padStart(ass ? 2 : 3,"0")
+            }
+            const vtt = parseVtt(content)
+            if (vtt.length) {
+                const indexes = matches.map(c => c.line)
+                const replacements: Record<string, string> = Object.create(null)
+                for (const i of indexes) replacements[vtt[i].block] = vtt[i].block.replace(/((?:\d{2,}:)?\d{2}:\d{2}\.\d{3})\s+-->\s+((?:\d{2,}:)?\d{2}:\d{2}\.\d{3})/,
+                    stamp(vtt[i].start + seconds,false) + " --> " + stamp(vtt[i].end + seconds,false))
+                return { content: content.replace(/^\uFEFF/, "").replace(/\r\n?/g,"\n").split(/\n\s*\n/).map(b => replacements[b] || b).join("\n\n"), changed: matches.length }
+            }
+            const lines = content.replace(/^\uFEFF/, "").split(/\r?\n/)
+            for (const cue of matches) {
+                const fields = cue.fields!.slice()
+                fields[cue.startIndex!] = stamp(cue.start + seconds,true)
+                fields[cue.endIndex!] = stamp(cue.end + seconds,true)
+                lines[cue.line] = "Dialogue:" + fields.join(",")
+            }
+            return { content: lines.join("\r\n"), changed: matches.length }
+        }
+
+        function openSignTiming(): void {
+            syncFromVideoCore()
+            const item = activeSubtitle, key = playbackKey()
+            if (!item?.content || item.playback !== key) { ctx.toast.warning("SeaSubs: load a SeaSubs track for this episode first."); return }
+            const time = ctx.videoCore.getPlaybackStatus()?.currentTime
+            if (time == null || !Number.isFinite(Number(time))) { ctx.toast.warning("SeaSubs: player position is unavailable. Pause the video and try again."); return }
+            const seen: Record<string, boolean> = Object.create(null)
+            const baselineTime = Number(time) - animeDelay()/1000
+            const nearby = timingCues(item.content).filter(c => c.start <= baselineTime + 8 && c.end >= baselineTime - 8)
+                .filter(c => { const id = c.start + "|" + c.end + "|" + cueText(c.text); if (seen[id]) return false; seen[id] = true; return true })
+                .sort((a,b) => Math.abs(a.start - Number(time)) - Math.abs(b.start - Number(time))).slice(0,20)
+            if (!nearby.length) { ctx.toast.warning("SeaSubs: no editable subtitle near this position. Pause near the early sign and try again."); return }
+            palette.setItems(nearby.map((cue,index) => ({ label: cue.text.replace(/\s+/g," ").slice(0,140) + " — " + (cue.start+animeDelay()/1000).toFixed(2) + "s",
+                value: "sign-" + index, heading: index === 0 ? "Choose the sign to adjust" : undefined,
+                onSelect: () => {
+                    if (key !== playbackKey() || activeSubtitle !== item) return
+                    palette.setItems([-1,-0.5,0.5,1].map(seconds => ({ label: (seconds > 0 ? "Show later by " : "Show earlier by ") + Math.abs(seconds) + " seconds",
+                        value: String(seconds), onSelect: () => {
+                            syncFromVideoCore()
+                            if (key !== playbackKey() || activeSubtitle !== item) { ctx.toast.warning("SeaSubs: track or episode changed; choose the sign again."); return }
+                            const shifted = shiftSign(item.content!,cue,seconds)
+                            if (!shifted.changed) { ctx.toast.warning("SeaSubs: that adjustment would start before the video."); return }
+                            const edited = { ...item, content: shifted.content, manualTiming: true,
+                                label: item.label.replace(/ — timing (?:matches provider|adjusted to provider|unverified|edited)$/, "") + " — timing edited" }
+                            emitSubtitle(edited)
+                            activeSubtitle = edited
+                            cacheTrack(edited)
+                            const list = resultLists[episodeKey()]
+                            const sourceLabel = (label: string) => label.replace(/ — timing (?:matches provider|adjusted to provider|unverified|edited)$/, "")
+                                .replace(/ \(\d+ events\)$/, "").replace(/^Generate Signs & Songs/, "Generated Signs & Songs")
+                            if (list) resultLists[episodeKey()] = list.map(i => i.url === item.url && sourceLabel(i.label) === sourceLabel(item.label) ? edited : i)
+                            console.log("SeaSubs sign timing edited", { start:cue.start,end:cue.end,seconds,events:shifted.changed })
+                            ctx.toast.success("SeaSubs: moved only the selected sign. Pause and repeat to adjust further.")
+                            palette.close()
+                        } })))
+                } })))
+            palette.open()
         }
 
         function showCandidates(items: AnimeToshoResult[], key: string, automatic = false): void {
@@ -904,11 +1046,13 @@ function init() {
             if (searching) return
             if (wider) timingReference = undefined
             searching = true
+            tray.update()
             unreadable = 0
             try { await runSearch(automatic, wider) }
             catch (err) { console.log("SeaSubs search failed", String(err)); ctx.toast.error("SeaSubs: search failed; see log.") }
             finally {
                 searching = false
+                tray.update()
                 if (pendingAuto) { pendingAuto = false; scheduleAuto() }
             }
         }
@@ -1002,6 +1146,12 @@ function init() {
         }
 
         async function loadSubtitle(item: OSResult, key: string): Promise<void> {
+            loadingTracks++
+            tray.update()
+            try { await loadSubtitleImpl(item,key) }
+            finally { loadingTracks--; tray.update() }
+        }
+        async function loadSubtitleImpl(item: OSResult, key: string): Promise<void> {
             const fileId = item.attributes?.files?.[0]?.file_id
             if (!fileId) {
                 ctx.toast.error("SeaSubs: this result has no downloadable subtitle file.")
@@ -1032,13 +1182,7 @@ function init() {
             // the player's normal subtitle selector.
             const playerType = ctx.videoCore.getCurrentPlayerType()
             if (playerType) {
-                ctx.videoCore.addExternalSubtitleTrack({
-                    src: link,
-                    label,
-                    language: "en",
-                    type,
-                    default: true,
-                })
+                await loadCandidate({url:link,label:labelFor(item),language:"en",type,score:0,mode:"direct",playback:key})
                 ctx.videoCore.showMessage("SeaSubs loaded: " + labelFor(item), 2500)
                 ctx.toast.success("SeaSubs: external subtitle added to the player.")
                 palette.close()
@@ -1077,6 +1221,10 @@ function init() {
                 const playlist = ctx.videoCore.getPlaybackState()?.playbackInfo?.episode
                 if (playlist?.episodeNumber) episode = Number(playlist.episodeNumber)
             }
+            if (delayFieldAnime !== seriesKey()) {
+                delayFieldAnime = seriesKey()
+                delayField.setValue((animeDelay()/1000).toFixed(3))
+            }
             tray.update()
         }
 
@@ -1110,6 +1258,16 @@ function init() {
         ctx.screen.loadCurrent()
 
         ctx.registerEventHandler("seasubs-search", () => { void search() })
+        ctx.registerEventHandler("seasubs-sign-timing", () => openSignTiming())
+        ctx.registerEventHandler("seasubs-delay-apply", () => {
+            syncFromVideoCore()
+            const value = parseDelay(String(delayField.current))
+            if (value === undefined) { ctx.toast.warning("SeaSubs: enter seconds, such as 1.250 or -0.250, or milliseconds, such as 250ms (maximum ±120s)."); return }
+            applyAnimeDelay(value)
+        })
+        ctx.registerEventHandler("seasubs-delay-plus", () => { syncFromVideoCore(); applyAnimeDelay(Math.min(120000,animeDelay()+100)) })
+        ctx.registerEventHandler("seasubs-delay-minus", () => { syncFromVideoCore(); applyAnimeDelay(Math.max(-120000,animeDelay()-100)) })
+        ctx.registerEventHandler("seasubs-delay-reset", () => applyAnimeDelay(0))
         ctx.registerEventHandler("seasubs-follow", () => {
             syncFromVideoCore()
             if (!mediaId || !episode) return
@@ -1124,7 +1282,21 @@ function init() {
             tray.text("SeaSubs"),
             tray.text("External Forced / Signs & Songs subtitle fallback."),
             tray.text(title && episode ? title + " — Episode " + episode : "Start an episode, then search."),
-            tray.button("Find external subtitles", { onClick: "seasubs-search", intent: "primary" }),
+            tray.button(searching ? "Finding subtitles…" : loadingTracks ? "Loading subtitle…" : "Find external subtitles",
+                { onClick: "seasubs-search", intent: "primary", loading: searching || loadingTracks > 0, disabled: searching || loadingTracks > 0 }),
+            tray.text("Subtitle delay for this anime: " + (animeDelay()/1000).toFixed(3) + " seconds"),
+            tray.input({ label: "Delay (+ later / − earlier)", placeholder: "1.250 seconds, or 250ms", fieldRef: delayField }),
+            tray.flex([
+                tray.button("Apply and save delay", { onClick: "seasubs-delay-apply", intent: "primary" }),
+                tray.button("Reset delay", { onClick: "seasubs-delay-reset" }),
+            ], { gap: 2 }),
+            tray.flex([
+                tray.button("Later +100ms", { onClick: "seasubs-delay-plus" }),
+                tray.button("Earlier −100ms", { onClick: "seasubs-delay-minus" }),
+            ], { gap: 2 }),
+            tray.text("Saved for this anime and sub/dub mode; applied to its next episodes automatically."),
+            tray.button("Adjust one subtitle's timing", { onClick: "seasubs-sign-timing" }),
+            tray.text("Pause near an early or late sign, then adjust only that sign. Edits stay in this session's episode cache."),
             tray.text(followPreference().enabled ? "Automatic Signs & Songs is on for this anime." : "Choose a signs track to continue automatically on the next episode."),
             tray.button(followPreference().enabled ? "Pause automatic subtitles" : "Enable automatic subtitles", { onClick: "seasubs-follow" }),
             tray.text("Shortcut: Ctrl/Cmd + Shift + S"),
