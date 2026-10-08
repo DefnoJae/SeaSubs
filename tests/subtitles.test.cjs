@@ -12,6 +12,7 @@ function harness(fetch, storage = new Map()) {
     let media = {id:154692,title:{english:'Girlfriend, Girlfriend Season 2'}};
     const listeners = new Map(), handlers = new Map(), timers = new Map(); let nextTimer = 0;
     const observers=new Map();let domReady;
+    const restored=[];let originalTrack=2,originalCaption=-1;
     const fields = []; let trayRender, position = 10;
     const layout=(items,props)=>({items,...props});
     const tray = {close() {palette.trayClosed=true},update() {}, render(fn) {trayRender=fn},flex:layout,stack:layout,div:layout,
@@ -21,6 +22,9 @@ function harness(fetch, storage = new Map()) {
         fieldRef:value=>{let change;const ref={current:value,setValue(v){this.current=v},onValueChange(fn){change=fn},userChange(v){this.current=v;change?.(v)}};fields.push(ref);return ref},
         toast: Object.fromEntries(['success','warning','error','info'].map(k => [k, x => messages.push(x)])),
         videoCore: { getCurrentPlaybackInfo: () => playback, getCurrentMedia: () => media,
+            sendGetSubtitleTrack:()=>listeners.get('video-subtitle-track')?.({playbackId:playback.id,trackNumber:originalTrack}),
+            sendGetMediaCaptionTrack:()=>listeners.get('video-media-caption-track')?.({playbackId:playback.id,trackIndex:originalCaption}),
+            setSubtitleTrack:n=>restored.push(['subtitle',n]),setMediaCaptionTrack:n=>restored.push(['caption',n]),
             getPlaybackStatus:()=>({currentTime:position}),getPlaybackState: () => ({playbackInfo:playback}), addExternalSubtitleTrack: t => injected.push(t), showMessage() {}, addEventListener:(name,fn) => listeners.set(name,fn) },
         playback:{ registerEventListener() {} }, dom:{ onReady(fn) {domReady=fn},observe:(selector,fn)=>observers.set(selector,fn) }, screen:{ onNavigate() {}, loadCurrent() {} },
         anime:{ getAnimeMetadata: async () => ({episodes:{4:{anidbId:271605},5:{anidbId:271606},6:{anidbId:271607}}}) },
@@ -41,6 +45,7 @@ function harness(fetch, storage = new Map()) {
     return { sandbox, hooks:sandbox.testHooks, palette, injected, messages, storage,
         fields,renderTree:()=>trayRender(),renderTray:()=>{const nodes=[];function walk(n){if(!n)return;if(Array.isArray(n)){n.forEach(walk);return}nodes.push(n);n.items?.forEach(walk)}walk(trayRender());return nodes},setPosition:value=>{position=value},
         observers,runDomReady:()=>domReady(),
+        restored,setOriginal:(track,caption=-1)=>{originalTrack=track;originalCaption=caption},
         setMedia:value=>{media=value},
         setTracks:tracks => {playback.subtitleTracks = tracks},
         change:(ep=4,mediaId=154692,dub=true) => {playback = {...playback,id:'episode-'+ep,onlinestreamParams:{episodeNumber:ep,dubbed:dub}}; media={...media,id:mediaId}},
@@ -48,6 +53,19 @@ function harness(fetch, storage = new Map()) {
         flushTimers:() => {const fns=[...timers.values()]; timers.clear(); for(const fn of fns) fn()} };
 }
 const response = text => ({ok:true,status:200,text:() => text,json:() => JSON.parse(text)});
+test('restore returns to original tracks, pauses following and retains the baseline across repeated injections', async () => {
+    const h=harness(),track={label:'Signs',url:'',content:'1\n00:01:00,000 --> 00:01:02,000\nSign',type:'srt',language:'en',score:1000,mode:'direct',playback:h.hooks.playbackKey()};
+    h.setOriginal(3,1);await h.hooks.loadCandidate(track);
+    h.setOriginal(100);await h.hooks.loadCandidate(track);
+    h.handle('seasubs-restore');
+    assert.deepEqual(h.restored,[['subtitle',3],['caption',1]]);
+    assert.equal(h.storage.get('follow-154692|true').enabled,false);
+    assert.equal(h.renderTray().find(n=>n.onClick==='seasubs-restore').disabled,true);
+    h.flushTimers();assert.equal(h.injected.length,2);
+    h.setOriginal(-1);await h.hooks.loadCandidate(track);h.handle('seasubs-restore');
+    assert.deepEqual(h.restored.slice(-2),[['subtitle',-1],['caption',-1]]);
+    h.change(5);h.hooks.syncFromVideoCore();h.handle('seasubs-restore');assert.equal(h.restored.length,4);
+});
 test('manual injection dismisses tray and shows cue/source status; automatic injection leaves tray open', async () => {
     const h=harness();
     const track={label:'Publisher Forced',url:'',content:'1\n00:08:15,904 --> 00:08:22,578\nSTARE',type:'srt',language:'en',score:1000,mode:'direct',playback:h.hooks.playbackKey()};

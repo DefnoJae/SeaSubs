@@ -141,7 +141,7 @@ function init() {
         const API_KEY = "{{apiKey}}"
         const PREFER_FORCED = String("{{preferForced}}") !== "false"
         const API = "https://api.opensubtitles.com/api/v1"
-        const UA = "SeaSubs v0.12.2"
+        const UA = "SeaSubs v0.13.0"
 
         let title = ""
         let episode = 0
@@ -161,6 +161,43 @@ function init() {
         let autoScheduledKey = ""
         const cachedTracks: Record<string, AnimeToshoResult> = {}
         let activeSubtitle: AnimeToshoResult | undefined
+        let originalSelection: { key:string, subtitle:number, caption:number } | undefined
+        let selectionRequest: { key:string, subtitle?:number, caption?:number, finish:()=>void } | undefined
+        async function captureOriginalSelection(key: string): Promise<void> {
+            if (originalSelection?.key === key) return
+            await new Promise<void>(resolve => {
+                const finish = () => {
+                    if (selectionRequest?.key !== key) return
+                    const request = selectionRequest
+                    selectionRequest = undefined
+                    if (key === playbackKey()) originalSelection = { key, subtitle:request.subtitle ?? -1, caption:request.caption ?? -1 }
+                    resolve()
+                }
+                selectionRequest = { key,finish }
+                ctx.setTimeout(finish,1200)
+                ctx.videoCore.sendGetSubtitleTrack()
+                ctx.videoCore.sendGetMediaCaptionTrack()
+            })
+        }
+        function restoreOriginalSubtitles(): void {
+            syncFromVideoCore()
+            if (searching || loadingTracks) return
+            const key = playbackKey(), previous = originalSelection
+            if (previous?.key !== key || activeSubtitle?.playback !== key) return
+            savePreference({ ...followPreference(), enabled:false })
+            if (autoCancel) { autoCancel(); autoCancel = undefined }
+            autoScheduledKey = ""
+            autoAttemptedKey = ""
+            pendingAuto = false
+            ctx.videoCore.setSubtitleTrack(previous.subtitle)
+            ctx.videoCore.setMediaCaptionTrack(previous.caption)
+            activeSubtitle = undefined
+            delete cachedTracks[episodeKey()]
+            originalSelection = undefined
+            searchStatus = "Original subtitle selection restored · automatic loading paused."
+            tray.update()
+            ctx.toast.success("SeaSubs: restored original subtitles and paused automatic loading.")
+        }
         const animeDelays: Record<string, number> = {}
         const delayField = ctx.fieldRef("0.000")
         const sliderField = ctx.fieldRef("0.000")
@@ -706,6 +743,8 @@ function init() {
             if (item.content) {
                 item = await prepareTiming(item)
                 syncFromVideoCore()
+                if (item.playback !== playbackKey() || (item.automatic && !followPreference().enabled)) return
+                await captureOriginalSelection(item.playback)
                 if (item.playback !== playbackKey() || (item.automatic && !followPreference().enabled)) return
                 emitSubtitle(item)
                 activeSubtitle = { ...item }
@@ -1296,6 +1335,20 @@ function init() {
         }
 
         ctx.videoCore.addEventListener("video-loaded", () => scheduleAuto())
+        ctx.videoCore.addEventListener("video-subtitle-track", event => {
+            const request = selectionRequest
+            if (!request || request.key !== playbackKey()) return
+            if (event.playbackId && String(event.playbackId) !== String(ctx.videoCore.getCurrentPlaybackInfo()?.id || "")) return
+            request.subtitle = Number(event.trackNumber)
+            if (request.caption !== undefined) request.finish()
+        })
+        ctx.videoCore.addEventListener("video-media-caption-track", event => {
+            const request = selectionRequest
+            if (!request || request.key !== playbackKey()) return
+            if (event.playbackId && String(event.playbackId) !== String(ctx.videoCore.getCurrentPlaybackInfo()?.id || "")) return
+            request.caption = Number(event.trackIndex)
+            if (request.subtitle !== undefined) request.finish()
+        })
         ctx.videoCore.addEventListener("video-playback-state", () => scheduleAuto())
         ctx.videoCore.addEventListener("video-playlist", (event) => {
             const ep = event?.playlist?.currentEpisode?.episodeNumber
@@ -1346,6 +1399,7 @@ function init() {
 
         ctx.registerEventHandler("seasubs-search", () => { void search() })
         ctx.registerEventHandler("seasubs-choose", () => chooseAnotherSubtitle())
+        ctx.registerEventHandler("seasubs-restore", () => restoreOriginalSubtitles())
         ctx.registerEventHandler("seasubs-sign-timing", () => openSignTiming())
         ctx.registerEventHandler("seasubs-delay-apply", () => {
             syncFromVideoCore()
@@ -1481,6 +1535,8 @@ function init() {
                     tray.button("Choose another subtitle ›",{onClick:"seasubs-choose",disabled:busy,className:"ss-alternatives"}),
                     tray.text(searchStatus,{className:"ss-status"}),
                     tray.text(activeSubtitle?.playback === playbackKey() ? activeSubtitle.label : "",{className:"ss-source"}),
+                    tray.button("Restore original subtitles",{onClick:"seasubs-restore",disabled:busy || activeSubtitle?.playback !== playbackKey(),className:"ss-alternatives"}),
+                    tray.text(activeSubtitle?.playback === playbackKey() ? "Stops SeaSubs playback; added tracks remain in the player menu." : "",{className:"ss-source"}),
                     tray.div([
                         tray.div([
                             tray.img({src:icon("clock"),alt:"",className:"ss-icon"}),

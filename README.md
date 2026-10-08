@@ -2,6 +2,13 @@
 
 Seanime plugin for external English Forced / Signs & Songs subtitles. Adds only subtitle tracks through VideoCore; preserves your current video provider, quality and audio.
 
+## v0.13.0 restore original subtitles
+
+- Adds **Restore original subtitles** beneath the selected source. Captures the player's subtitle and media-caption selections before the first SeaSubs injection in an episode, preserving that baseline across alternatives and timing changes.
+- Restores the original selections (including Off), pauses automatic following for this anime/mode, cancels pending automatic scheduling and clears the active SeaSubs track/cache choice. Video and audio remain untouched. Another explicit Find starts SeaSubs again.
+- Seanime has no extension API to delete added tracks: they remain selectable in its subtitle menu. The button stops using them and restores the prior selection. If the player does not answer the selection request within 1.2 seconds, restoration falls back to Off. Baseline capture is session-only; restoration is disabled until SeaSubs loads a track in that session and while loading/searching.
+- Regression checks cover previous track/Off restoration, media captions, repeated injections, paused following and episode isolation.
+
 ## v0.12.2 visible completion and selected source
 
 - Shows search/load status, the selected release and cue count in the panel. Successful manual loads dismiss the tray before showing the success toast; automatic following keeps it open. Clears status when playback changes.
