@@ -1,7 +1,7 @@
 {
   "id": "seasubs",
   "name": "SeaSubs",
-  "version": "0.7.4",
+  "version": "0.8.0",
   "icon": "https://raw.githubusercontent.com/DefnoJae/SeaSubs/main/marketplace-icon.png",
   "manifestURI": "https://raw.githubusercontent.com/DefnoJae/SeaSubs/main/Manifest.json",
   "language": "typescript",
@@ -26,7 +26,7 @@
       "scopes": ["storage","playback"],
       "allow": {
         "networkAccess": {
-          "allowedDomains": ["animeya.cc","new.vidnest.fun","*.northernsummit.world","*.embermeadow.world","feed.animetosho.org","animetosho.org/storage/attach/","storage.animetosho.org/attach/","feed.animetosho.xyz","storage.animetosho.xyz","storage.animetosho.net/attachments/","api.opensubtitles.com","*.opensubtitles.com"],
+          "allowedDomains": ["animeya.cc","new.vidnest.fun","*.northernsummit.world","*.embermeadow.world","*.broforgotsave.online","feed.animetosho.org","animetosho.org/storage/attach/","storage.animetosho.org/attach/","feed.animetosho.xyz","storage.animetosho.xyz","storage.animetosho.net/attachments/","api.opensubtitles.com","*.opensubtitles.com"],
           "reasoning": "Read English subtitle content from Vidnest's observed subtitle CDNs and AnimeTosho attachments, including compressed XZ files, with optional OpenSubtitles fallback."
         }
       }

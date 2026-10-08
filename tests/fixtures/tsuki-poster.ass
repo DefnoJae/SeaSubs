@@ -1,0 +1,10 @@
+[Script Info]
+ScriptType: v4.00+
+PlayResX: 624
+PlayResY: 366
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: sign_8045_86_Members_Souper_W - Copy,Arial,20,&H005B5B5B,&H000000FF,&H00CDCDCD,&H00B8B8B8,1,0,0,0,100,100,0,0,1,2,1,8,0208,0010,0075,1
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Dialogue: 0,0:05:45.80,0:05:50.55,sign_8045_86_Members_Souper_W - Copy,Text,0000,0000,0000,,Members Souper Wanted

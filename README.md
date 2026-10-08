@@ -2,6 +2,13 @@
 
 Seanime plugin for external English Forced / Signs & Songs subtitles. Adds only subtitle tracks through VideoCore; preserves your current video provider, quality and audio.
 
+## v0.8.0 episode matching and reusable results
+
+- Filters season-batch subtitle attachments by the requested episode, including decimal special episodes. The Tsukigakirei Episode 1 replay checks the poster sign at 5:47 against the actual Episode 1 ASS.
+- Keeps search alternatives available after choosing a track, with **Search other subtitle sources** for wider discovery. Selected-track caching is used for automatic playback, rather than replacing manual results.
+- Tries derivation from the correct English ASS early, prefers releases advertising subtitle tracks over known MP4/hardsub releases, and removes the ASS byte-order mark.
+- Allows the observed `*.broforgotsave.online` Animeya subtitle CDN. Adds regression coverage for the user's real season batch and repeated selections.
+
 ## v0.7.4 icon framing
 
 - Uses a padded square PNG of the supplied logo so the marketplace's cropped, rounded frame shows the complete artwork.

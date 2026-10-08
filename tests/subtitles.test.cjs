@@ -24,7 +24,7 @@ function harness(fetch, storage = new Map()) {
     vm.createContext(rootSandbox);
     let code = fs.readFileSync(path.join(root,'code.ts'),'utf8');
     code = code.replace('ctx.registerEventHandler("seasubs-search",',
-        'globalThis.testHooks = {SeaSubsXZ, parseVtt, inferDubCompanion, deriveVtt, currentCandidates, runSearch, search, scheduleAuto, searchAnimeToshoHost, deriveSignsSongsAss, inspectCandidates, syncFromVideoCore, showCandidates, playbackKey}; ctx.registerEventHandler("seasubs-search",');
+        'globalThis.testHooks = {collectSubtitleAttachments, SeaSubsXZ, parseVtt, inferDubCompanion, deriveVtt, currentCandidates, runSearch, search, scheduleAuto, searchAnimeToshoHost, deriveSignsSongsAss, inspectCandidates, syncFromVideoCore, showCandidates, playbackKey}; ctx.registerEventHandler("seasubs-search",');
     vm.runInContext(ts.transpileModule(code, {compilerOptions:{target:ts.ScriptTarget.ES2018}}).outputText, rootSandbox);
     rootSandbox.init();
     // Seanime serializes the callback and evaluates it in a separate UI VM.
@@ -38,6 +38,58 @@ function harness(fetch, storage = new Map()) {
         flushTimers:() => {const fns=[...timers.values()]; timers.clear(); for(const fn of fns) fn()} };
 }
 const response = text => ({ok:true,status:200,text:() => text,json:() => JSON.parse(text)});
+test('real Tsukigakirei batch maps Episode 1 to its own attachment and visible poster sign', () => {
+    const h = harness(); h.change(1,98202); h.hooks.syncFromVideoCore();
+    const batch = JSON.parse(fs.readFileSync(path.join(__dirname,'fixtures/tsuki-batch.json')));
+    const attachments = h.hooks.collectSubtitleAttachments(batch);
+    assert.ok(attachments.some(a => a.id === 371919));
+    assert.ok(!attachments.some(a => a.id === 374581)); // Episode 9 from the user's log
+    const full = fs.readFileSync(path.join(__dirname,'fixtures/tsuki-poster.ass'),'utf8');
+    const derived = h.hooks.deriveSignsSongsAss(full);
+    assert.match(derived.content,/0:05:45\.80,0:05:50\.55,.*Members Souper Wanted/);
+    assert.ok(!derived.content.startsWith('\uFEFF'));
+    h.change(6,98202); h.hooks.syncFromVideoCore();
+    const episode6 = h.hooks.collectSubtitleAttachments(batch);
+    assert.ok(episode6.some(a => a.id === 371944));
+    assert.ok(!episode6.some(a => a.id === 371977)); // Episode 6.5
+});
+test('selecting generated signs retains alternatives on reopening instead of showing only cached choice', async () => {
+    const h = harness(async () => {throw new Error('Reopening must use results, not network')});
+    const full = fs.readFileSync(path.join(__dirname,'fixtures/tsuki-poster.ass'),'utf8');
+    const items = [{label:'Generate Signs & Songs — English — [Erai-raws]',url:'https://example/one.ass',content:full,type:'ass',language:'en',score:100,mode:'derive'},
+        {label:'Alternative English Signs',url:'https://example/two.ass',content:full,type:'ass',language:'en',score:1000,mode:'direct'}];
+    h.hooks.showCandidates(items,h.hooks.playbackKey());
+    h.palette.items[0].onSelect();
+    await new Promise(resolve => setImmediate(resolve));
+    await h.hooks.runSearch();
+    assert.equal(h.palette.items[0].label,items[0].label);
+    assert.equal(h.palette.items[1].label,items[1].label);
+    assert.equal(h.palette.items[2].label,'Search other subtitle sources');
+    assert.equal(h.injected.length,1);
+});
+test('Episode 1 generated signs take three requests and bypass slow fallback sources', async () => {
+    const calls = [];
+    const batch = JSON.parse(fs.readFileSync(path.join(__dirname,'fixtures/tsuki-batch.json')));
+    const poster = fs.readFileSync(path.join(__dirname,'fixtures/tsuki-poster.ass'),'utf8');
+    const h = harness(async url => {
+        calls.push(url);
+        if (url.endsWith('eid=271605')) return response(JSON.stringify([{id:214423,title:batch.title,status:'complete'}]));
+        if (url.endsWith('show=torrent&id=214423')) return response(JSON.stringify(batch));
+        throw new Error('Unexpected slow fallback '+url);
+    });
+    h.change(1,98202); h.hooks.syncFromVideoCore();
+    h.sandbox.__ctx.anime.getAnimeMetadata = async () => ({episodes:{1:{anidbId:271605}}});
+    // The small committed poster excerpt verifies rendering content without bundling a full subtitle.
+    // Supply it through an uncompressed attachment for a portable request-path regression.
+    batch.files.find(f => f.filename.includes(' - 01 ')).attachments.find(a => a.id === 371919).url = 'https://fixture.test/episode1.ass';
+    const originalFetch = h.sandbox.__ctx.fetch;
+    h.sandbox.__ctx.fetch = async url => url === 'https://fixture.test/episode1.ass' ? (calls.push(url),response(poster)) : originalFetch(url);
+    await h.hooks.runSearch();
+    assert.equal(calls.length,3);
+    assert.match(h.palette.items[0].label,/Generated Signs & Songs/);
+    h.palette.items[0].onSelect(); await new Promise(resolve => setImmediate(resolve));
+    assert.match(h.injected[0].content,/Members Souper Wanted/);
+});
 const stamp = n => new Date(n * 1000).toISOString().slice(11,23);
 const vtt = cues => 'WEBVTT\n\n' + cues.map((c,i) => `${i}\n${stamp(c.start)} --> ${stamp(c.end)}\n${c.text}`).join('\n\n');
 test('decoder runs without Node/browser globals and verifies checksums', () => {

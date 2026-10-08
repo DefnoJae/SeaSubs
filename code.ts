@@ -91,7 +91,7 @@ buffer/index.js:
         const API_KEY = "{{apiKey}}"
         const PREFER_FORCED = String("{{preferForced}}") !== "false"
         const API = "https://api.opensubtitles.com/api/v1"
-        const UA = "SeaSubs v0.7.4"
+        const UA = "SeaSubs v0.8.0"
 
         let title = ""
         let episode = 0
@@ -107,6 +107,7 @@ buffer/index.js:
         let autoCancel: (() => void) | undefined
         let autoScheduledKey = ""
         const cachedTracks: Record<string, AnimeToshoResult> = {}
+        const resultLists: Record<string, AnimeToshoResult[]> = {}
         const cacheOrder: string[] = []
         const feedCache: Record<string, { time: number, rows: any[] }> = {}
         const seriesKey = () => String(mediaId) + "|" + String(dubbed)
@@ -240,8 +241,16 @@ buffer/index.js:
                     out.push(attach)
                 }
             }
-            add(torrent?.attachments || [])
-            for (const file of (torrent?.files || [])) add(file?.attachments || [])
+            const files = torrent?.files || []
+            // Batch file order is arbitrary. Never take another episode's subtitles.
+            if (files.length <= 1) add(torrent?.attachments || [])
+            for (const file of files) {
+                const filename = String(file.filename || file.name || "").split(/[\\/]/).pop() || ""
+                const match = filename.match(/(?:\s-\s|\bEpisode\s+|\bE)(\d{1,3}(?:\.\d+)?)(?:v\d+)?(?=[\s[._-]|$)/i)
+                if (match && Number(match[1]) !== episode) continue
+                if (files.length > 1 && !match) continue
+                add(file?.attachments || [])
+            }
             return out
         }
 
@@ -272,6 +281,8 @@ buffer/index.js:
                     const hint = followPreference().releaseHint
                     const rank = (e: any) => (hint && String(e.title || "").includes("[" + hint + "]") ? 10 : 0)
                         + (dubbed && /dub|dual|multi.?audio/i.test(String(e.title || "")) ? 3 : 0)
+                        + (/multiple.?subtitles?/i.test(String(e.title || "")) ? 2 : 0)
+                        - (/\.mp4\b/i.test(String(e.title || "")) || (/\[RH\]/.test(String(e.title || "")) && /dubbed/i.test(String(e.title || ""))) ? 5 : 0)
                     return rank(b) - rank(a)
                 })
                 .slice(0, 12)
@@ -321,7 +332,7 @@ buffer/index.js:
             return out
         }
 
-        async function searchAnimeTosho(): Promise<AnimeToshoResult[]> {
+        async function searchAnimeTosho(wider = false): Promise<AnimeToshoResult[]> {
             if (!mediaId || !episode) return []
             try {
                 const key = playbackKey(), requestedMedia = mediaId, requestedEpisode = episode
@@ -339,13 +350,21 @@ buffer/index.js:
                             const list = await searchAnimeToshoHost(host, eid, expanded)
                             sources.push(list)
                             const direct = list.filter(i => i.mode === "direct").sort((a, b) => b.score - a.score)
-                            for (const item of direct) {
+                            for (const item of (wider ? [] : direct)) {
                                 const content = await readCandidate(item)
                                 if (key !== playbackKey()) return []
                                 if (content) {
                                     console.log("SeaSubs fast Signs match", { source: item.label, events: (content.match(/^Dialogue\s*:/gm) || []).length })
                                     return [{ ...item, content }]
                                 }
+                            }
+                            if (!wider) for (const item of list.filter(i => i.mode === "derive").slice(0, 2)) {
+                                const full = await readCandidate(item)
+                                if (key !== playbackKey()) return []
+                                if (!full) continue
+                                const derived = deriveSignsSongsAss(full)
+                                if (derived.count) return [{ ...item, mode: "direct", content: derived.content, score: 2000,
+                                    label: item.label.replace(/^Generate Signs & Songs/, "Generated Signs & Songs") + " (" + derived.count + " events)" }]
                             }
                         } catch (err) { console.log("SeaSubs AnimeTosho host failed", host, String(err)) }
                     }
@@ -453,7 +472,7 @@ buffer/index.js:
             syncFromVideoCore()
             if (item.playback !== playbackKey()) { ctx.toast.warning("SeaSubs: episode changed; search again."); return }
             if (item.automatic && !followPreference().enabled) return
-            if (item.mode === "derive") { void deriveAndInject(item); return }
+            if (item.mode === "derive") { await deriveAndInject(item); return }
             if (/\.xz(?:[?#]|$)/i.test(item.url) && !item.content) {
                 item.content = await readCandidate(item)
                 syncFromVideoCore()
@@ -472,6 +491,17 @@ buffer/index.js:
 
         function showCandidates(items: AnimeToshoResult[], key: string, automatic = false): void {
             if (key !== playbackKey()) return
+            if (!automatic) {
+                resultLists[episodeKey()] = items.slice(0, 25)
+                if (Object.keys(resultLists).length > 6) delete resultLists[Object.keys(resultLists)[0]]
+                const keys = Object.keys(resultLists)
+                let size = keys.reduce((n, k) => n + resultLists[k].reduce((m, i) => m + (i.content?.length || 0), 0), 0)
+                for (const older of keys) {
+                    if (size <= 8000000) break
+                    size -= resultLists[older].reduce((n, i) => n + (i.content?.length || 0), 0)
+                    delete resultLists[older]
+                }
+            }
             if (automatic) {
                 const safe = items.find(i => i.score >= 500 && i.mode === "direct" && !!i.content)
                 if (safe) { void loadCandidate({ ...safe, playback: key, automatic: true }).catch(err => console.log("SeaSubs auto load failed", String(err))); return }
@@ -482,7 +512,10 @@ buffer/index.js:
             }
             palette.setItems(items.slice(0, 25).map((item, i) => ({ label: item.label, value: String(i),
                 heading: i === 0 ? "Subtitle tracks — unverified captions may contain dialogue" : undefined,
-                onSelect: () => { void loadCandidate({ ...item, playback: key }).catch(err => { console.log("SeaSubs load failed", String(err)); ctx.toast.error("SeaSubs: subtitle load failed.") }) } })))
+                onSelect: () => { void loadCandidate({ ...item, playback: key }).catch(err => { console.log("SeaSubs load failed", String(err)); ctx.toast.error("SeaSubs: subtitle load failed.") }) } })).concat([{
+                    label: "Search other subtitle sources", value: "search-more", heading: "More options",
+                    onSelect: () => { if (key === playbackKey()) void search(false, true) },
+                }]))
             palette.open()
         }
 
@@ -525,7 +558,7 @@ buffer/index.js:
         }
 
         function deriveSignsSongsAss(input: string): { content: string, count: number } {
-            const normalized = input.replace(/\r\n/g, "\n").replace(/\r/g, "\n")
+            const normalized = input.replace(/^\uFEFF/, "").replace(/\r\n/g, "\n").replace(/\r/g, "\n")
             const lines = normalized.split("\n")
             let inEvents = false
             let eventFormat: string[] = []
@@ -758,11 +791,11 @@ buffer/index.js:
             }
         }
 
-        async function search(automatic = false): Promise<void> {
+        async function search(automatic = false, wider = false): Promise<void> {
             if (searching) return
             searching = true
             unreadable = 0
-            try { await runSearch(automatic) }
+            try { await runSearch(automatic, wider) }
             catch (err) { console.log("SeaSubs search failed", String(err)); ctx.toast.error("SeaSubs: search failed; see log.") }
             finally {
                 searching = false
@@ -770,7 +803,7 @@ buffer/index.js:
             }
         }
 
-        async function runSearch(automatic = false): Promise<void> {
+        async function runSearch(automatic = false, wider = false): Promise<void> {
             syncFromVideoCore()
             if (!title || !episode) {
                 ctx.toast.warning("SeaSubs: start an episode first so I know what to search for.")
@@ -780,12 +813,14 @@ buffer/index.js:
             const key = playbackKey()
             if (automatic && !followPreference().enabled) return
             const cached = cachedTracks[episodeKey()]
-            if (cached) {
+            const previous = resultLists[episodeKey()]
+            if (!automatic && !wider && previous) { showCandidates(previous, key); return }
+            if (automatic && cached) {
                 showCandidates([cached], key, automatic)
                 return
             }
 
-            const animeTosho = await searchAnimeTosho()
+            const animeTosho = await searchAnimeTosho(wider)
             syncFromVideoCore()
             if (key !== playbackKey()) return
             if (animeTosho.some(i => i.content && i.mode === "direct")) {
