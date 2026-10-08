@@ -2,6 +2,14 @@
 
 Seanime plugin for external English Forced / Signs & Songs subtitles. Adds only subtitle tracks through VideoCore; preserves your current video provider, quality and audio.
 
+## v0.12.0 redesigned native panel
+
+- Compact anime card, SeaSubs logo and wave header, a prominent gradient search action with native loading feedback, and a small link to retained alternatives.
+- Timing is grouped into one card with an editable seconds pill, slider, ±100ms controls and Reset. Changes save automatically per anime and sub/dub mode; the exact input also accepts milliseconds and retains the ±120-second limit. Invalid values show an inline hint. Positive values move subtitles later.
+- Per-sign adjustment and automatic following are compact cards. Automatic following uses Seanime's native switch and displays a subtle glow when enabled. Existing subtitle sources, generation, timing comparison, per-sign edits, caching, keyboard shortcut, alternative picker and playback preservation remain in place.
+- Uses native tray layouts, images, buttons, inputs and switch with scoped CSS. Seanime has no slider primitive: a DOM observer adapts only the timing input to a range while retaining the native field/change bridge. Inline vector icons use the native image component; no embedded web page or browser scripts.
+- Regression checks cover autosave, exact/slider synchronization, switch persistence, slider bounds and existing subtitle flows. The local browser preview could not be opened, so final appearance still needs confirmation in Seanime.
+
 ## v0.11.0 load first, choose alternatives separately
 
 - **Find external subtitles** searches and loads the first ranked readable signs track directly, without opening a selection dialog. Repeated Find uses the remembered selection when available. Loading and success feedback remain visible.

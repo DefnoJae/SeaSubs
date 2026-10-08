@@ -160,7 +160,7 @@ buffer/index.js:
         const API_KEY = "{{apiKey}}"
         const PREFER_FORCED = String("{{preferForced}}") !== "false"
         const API = "https://api.opensubtitles.com/api/v1"
-        const UA = "SeaSubs v0.11.0"
+        const UA = "SeaSubs v0.12.0"
 
         let title = ""
         let episode = 0
@@ -180,6 +180,8 @@ buffer/index.js:
         let activeSubtitle: AnimeToshoResult | undefined
         const animeDelays: Record<string, number> = {}
         const delayField = ctx.fieldRef("0.000")
+        const sliderField = ctx.fieldRef("0.000")
+        const followField = ctx.fieldRef(false)
         let delayFieldAnime = ""
         function animeDelay(): number {
             const key = seriesKey()
@@ -238,15 +240,16 @@ buffer/index.js:
                 label: "SeaSubs — " + item.label + (delay ? " (delay " + (delay > 0 ? "+" : "") + (delay/1000).toFixed(3) + "s)" : ""),
                 language: item.language, type: type as "vtt" | "ass" | "ssa" | "srt", default: true })
         }
-        function applyAnimeDelay(milliseconds: number): void {
+        function applyAnimeDelay(milliseconds: number, quiet = false): void {
             syncFromVideoCore()
             if (!mediaId || !episode) { ctx.toast.warning("SeaSubs: start an episode first."); return }
             animeDelays[seriesKey()] = milliseconds
             try { $storage.set("timing-delay-" + seriesKey(),milliseconds) } catch (err) { console.log("SeaSubs delay save failed",String(err)) }
             delayField.setValue((milliseconds/1000).toFixed(3))
+            sliderField.setValue((milliseconds/1000).toFixed(3))
             if (activeSubtitle?.content && activeSubtitle.playback === playbackKey()) emitSubtitle(activeSubtitle)
             tray.update()
-            ctx.toast.success("SeaSubs: saved delay for this anime: " + (milliseconds/1000).toFixed(3) + "s.")
+            if (!quiet) ctx.toast.success("SeaSubs: saved delay for this anime: " + (milliseconds/1000).toFixed(3) + "s.")
         }
         const resultLists: Record<string, AnimeToshoResult[]> = {}
         const cacheOrder: string[] = []
@@ -269,6 +272,7 @@ buffer/index.js:
 
         function savePreference(preference: FollowPreference): void {
             preferences[seriesKey()] = preference
+            followField.setValue(preference.enabled)
             try { $storage.set("follow-" + seriesKey(), preference) }
             catch (err) { console.log("SeaSubs preference save failed", String(err)) }
             tray.update()
@@ -312,7 +316,7 @@ buffer/index.js:
             }, 500)
         }
 
-        const tray = ctx.newTray({ withContent: true, iconUrl: "https://raw.githubusercontent.com/DefnoJae/SeaSubs/main/marketplace-icon.png" })
+        const tray = ctx.newTray({ withContent: true, width: "32rem", iconUrl: "https://raw.githubusercontent.com/DefnoJae/SeaSubs/main/marketplace-icon.png" })
         const palette = ctx.newCommandPalette({
             placeholder: "SeaSubs — search Forced / Signs & Songs",
             keyboardShortcut: "mod+shift+s",
@@ -1293,6 +1297,8 @@ buffer/index.js:
             if (delayFieldAnime !== seriesKey()) {
                 delayFieldAnime = seriesKey()
                 delayField.setValue((animeDelay()/1000).toFixed(3))
+                sliderField.setValue((animeDelay()/1000).toFixed(3))
+                followField.setValue(followPreference().enabled)
             }
             tray.update()
         }
@@ -1314,6 +1320,26 @@ buffer/index.js:
 
         ctx.dom.onReady(() => {
             scheduleAuto()
+            // Seanime has no slider primitive. Keep its native input, field-ref and
+            // debounced change bridge; only adapt this scoped input's HTML type.
+            ctx.dom.observe('.ss-slider input', inputs => {
+                for (const input of inputs) {
+                    const limit = Math.min(120,Math.max(5, Math.ceil(Math.abs(animeDelay()/1000) + 1)))
+                    const attrs: Record<string,string> = { min: String(-limit), max: String(limit), step: "0.1", type: "range", "aria-label": "Subtitle delay in seconds" }
+                    let adapted = false
+                    for (const name of Object.keys(attrs)) {
+                        if (input.attributes[name] !== attrs[name]) { input.setAttribute(name,attrs[name]); adapted = true }
+                    }
+                    // Expanding a range after an exact value update must restore
+                    // the thumb, since browsers can clamp to the previous bounds.
+                    if (adapted) input.setProperty("value",String(animeDelay()/1000))
+                }
+            })
+            ctx.dom.observe('.ss-delay input', inputs => {
+                for (const input of inputs) {
+                    if (input.attributes["aria-label"] !== "Subtitle delay; seconds or milliseconds") input.setAttribute("aria-label","Subtitle delay; seconds or milliseconds")
+                }
+            })
             // The palette is portaled and its rows are recreated when results change.
             // Scope the observer to our input so other Seanime palettes keep their styles.
             ctx.dom.observe('[cmdk-root]:has(input[placeholder="SeaSubs — search Forced / Signs & Songs"]) [cmdk-item]', rows => {
@@ -1338,6 +1364,13 @@ buffer/index.js:
         ctx.registerEventHandler("seasubs-delay-plus", () => { syncFromVideoCore(); applyAnimeDelay(Math.min(120000,animeDelay()+100)) })
         ctx.registerEventHandler("seasubs-delay-minus", () => { syncFromVideoCore(); applyAnimeDelay(Math.max(-120000,animeDelay()-100)) })
         ctx.registerEventHandler("seasubs-delay-reset", () => applyAnimeDelay(0))
+        // Native inputs already debounce their changes by 200ms. Compare against
+        // saved state so programmatic synchronization cannot reinject in a loop.
+        for (const field of [delayField, sliderField]) field.onValueChange(value => {
+            const milliseconds = parseDelay(String(value))
+            if (milliseconds !== undefined && milliseconds !== animeDelay()) applyAnimeDelay(milliseconds,true)
+            else if (milliseconds === undefined) tray.update()
+        })
         ctx.registerEventHandler("seasubs-follow", () => {
             syncFromVideoCore()
             if (!mediaId || !episode) return
@@ -1347,30 +1380,137 @@ buffer/index.js:
             if (preference.enabled && autoCancel) { autoCancel(); autoCancel = undefined; autoScheduledKey = "" }
             if (!preference.enabled) scheduleAuto()
         })
+        followField.onValueChange(enabled => {
+            if (enabled !== followPreference().enabled) {
+                syncFromVideoCore()
+                if (!mediaId || !episode) return
+                savePreference({ ...followPreference(), enabled })
+                autoAttemptedKey = ""
+                if (autoCancel) { autoCancel(); autoCancel = undefined; autoScheduledKey = "" }
+                if (enabled) scheduleAuto()
+            }
+        })
 
-        tray.render(() => tray.stack([
-            tray.text("SeaSubs"),
-            tray.text("External Forced / Signs & Songs subtitle fallback."),
-            tray.text(title && episode ? title + " — Episode " + episode : "Start an episode, then search."),
-            tray.button(searching ? "Finding subtitles…" : loadingTracks ? "Loading subtitle…" : "Find external subtitles",
-                { onClick: "seasubs-search", intent: "primary", loading: searching || loadingTracks > 0, disabled: searching || loadingTracks > 0 }),
-            tray.button("Choose another subtitle", { onClick: "seasubs-choose", disabled: searching || loadingTracks > 0 }),
-            tray.text("Subtitle delay for this anime: " + (animeDelay()/1000).toFixed(3) + " seconds"),
-            tray.input({ label: "Delay (+ later / − earlier)", placeholder: "1.250 seconds, or 250ms", fieldRef: delayField }),
-            tray.flex([
-                tray.button("Apply and save delay", { onClick: "seasubs-delay-apply", intent: "primary" }),
-                tray.button("Reset delay", { onClick: "seasubs-delay-reset" }),
-            ], { gap: 2 }),
-            tray.flex([
-                tray.button("Later +100ms", { onClick: "seasubs-delay-plus" }),
-                tray.button("Earlier −100ms", { onClick: "seasubs-delay-minus" }),
-            ], { gap: 2 }),
-            tray.text("Saved for this anime and sub/dub mode; applied to its next episodes automatically."),
-            tray.button("Adjust one subtitle's timing", { onClick: "seasubs-sign-timing" }),
-            tray.text("Pause near an early or late sign, then adjust only that sign. Edits stay in this session's episode cache."),
-            tray.text(followPreference().enabled ? "Automatic Signs & Songs is on for this anime." : "Choose a signs track to continue automatically on the next episode."),
-            tray.button(followPreference().enabled ? "Pause automatic subtitles" : "Enable automatic subtitles", { onClick: "seasubs-follow" }),
-            tray.text("Shortcut: Ctrl/Cmd + Shift + S"),
-        ]))
+        // Native images can display these small inline vector icons.
+        function icon(name: string): string {
+            const paths: Record<string,string> = {
+                search:'<circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/>',
+                clock:'<circle cx="12" cy="13" r="8"/><path d="M12 9v4l2 2M9 2h6M12 2v3"/>',
+                sign:'<path d="m12 3 2.5 6.5L21 12l-6.5 2.5L12 21l-2.5-6.5L3 12l6.5-2.5Z"/>',
+                settings:'<path d="m9 3-1 3-3 1-2 3 2 2-1 3 3 2 3-1 2 2 3-1 1-3 3-1 2-3-2-2 1-3-3-2-3 1-2-2Z"/><circle cx="12" cy="11" r="3"/>',
+                chevron:'<path d="m9 5 7 7-7 7"/>',
+            }
+            return "data:image/svg+xml," + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#e8eaff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">'+paths[name]+'</svg>')
+        }
+        const panelCSS = `
+            .ss-panel {padding:12px;display:flex;flex-direction:column;gap:9px;background:radial-gradient(ellipse at 100% 0%,#13203b55,transparent 40%),#080c14;color:#f4f5ff;border:1px solid #293551;border-radius:20px;box-shadow:0 16px 50px #0006;font-family:inherit}
+            .ss-panel p {margin:0;width:auto;word-break:normal}
+            .ss-header {display:flex;align-items:center;gap:12px;min-height:66px;position:relative;overflow:hidden;padding:2px 4px 7px}
+            .ss-header::after {content:"";position:absolute;width:180px;height:100px;right:-40px;top:-50px;border-radius:48%;border:14px solid #5446ed28;box-shadow:0 0 0 13px #188bef18,0 0 0 28px #6444bd15;transform:rotate(-25deg);pointer-events:none}
+            .ss-logo {width:56px;height:56px;object-fit:contain;flex-shrink:0;filter:drop-shadow(0 4px 12px #4736ff33)}
+            .ss-title {font-size:28px;font-weight:750;letter-spacing:-.8px;line-height:1.15;background:linear-gradient(110deg,#f8fbff,#a7cfff);background-clip:text;color:transparent}
+            .ss-sub {font-size:11px;line-height:1.45;color:#a8b5d0;margin-top:4px!important}
+            .ss-card {background:linear-gradient(135deg,#111827aa,#0c111b);border:1px solid #2a3559;border-radius:16px;padding:12px;box-shadow:inset 0 1px 0 #ffffff04}
+            .ss-anime {display:flex;align-items:center;gap:12px;padding:9px 11px}
+            .ss-cover {width:80px;height:49px;object-fit:cover;border-radius:10px;flex-shrink:0;background:#151c32}
+            .ss-anime-copy {min-width:0;flex:1}
+            .ss-anime-title {font-size:16px;font-weight:700;line-height:1.25;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+            .ss-episode {font-size:12px;color:#b1bdd4;display:flex;align-items:center;gap:8px;margin-top:5px}
+            .ss-format {font-size:10px;color:#bcafff;padding:2px 9px;background:#22243c;border:1px solid #383953;border-radius:20px;line-height:1.4}
+            .ss-panel button {cursor:pointer;transition:background .15s,border-color .15s,box-shadow .15s;border:1px solid #37446b;border-radius:11px;background:linear-gradient(135deg,#202a42,#161c2e);color:#f5f5ff;font-weight:600}
+            .ss-panel button:hover:not(:disabled) {border-color:#8270ea;background:#282845;box-shadow:0 0 15px #6441ff19}
+            .ss-panel button:focus-visible,.ss-panel input:focus-visible {outline:2px solid #a394ff;outline-offset:3px}
+            .ss-panel button:disabled {cursor:default;opacity:.55}
+            .ss-panel .ss-find {width:100%;min-height:76px;justify-content:flex-start;position:relative;padding:13px 37px 32px 59px;border-radius:16px;border-color:#9b88ff;font-size:19px;line-height:1.25;background:radial-gradient(ellipse at 100% 0%,#b47aff80,transparent 52%),linear-gradient(115deg,#4930f4,#293eed 60%,#753eff);box-shadow:0 5px 22px #492aff25;white-space:normal;text-align:left}
+            .ss-find::before {content:"";position:absolute;left:17px;top:24px;width:26px;height:26px;background:url("${icon("search")}") center/contain no-repeat}
+            .ss-find::after {content:"Search for Forced / Signs & Songs subtitles";position:absolute;left:59px;bottom:13px;font-size:11px;font-weight:400;color:#d1d6ff}
+            .ss-panel .ss-find:hover:not(:disabled) {filter:brightness(1.1);border-color:#c1afff}
+            .ss-find.ss-busy::before {display:none}
+            .ss-alternatives {align-self:flex-end;font-size:11px!important;min-height:25px!important;padding:3px 11px!important;margin-top:-4px;background:transparent!important;border-color:transparent!important;color:#b8b3df!important}
+            .ss-timing-head {display:flex;align-items:center;gap:9px;margin-bottom:9px}
+            .ss-icon {width:24px;height:24px;flex-shrink:0}
+            .ss-heading {font-size:14px;font-weight:650;line-height:1.3}
+            .ss-description {font-size:11px;color:#9daccc;line-height:1.4;margin-top:3px!important}
+            .ss-grow {flex:1;min-width:0}
+            .ss-delay {width:85px;flex-shrink:0;position:relative}
+            .ss-delay input {width:100%;height:32px!important;background:#211738!important;border:1px solid #6949e9!important;border-radius:20px!important;padding:4px 19px 4px 7px!important;text-align:right;font-size:15px!important;color:#c5afff!important;font-variant-numeric:tabular-nums}
+            .ss-delay::after {content:"s";position:absolute;right:9px;top:6px;color:#c5afff;font-size:15px;pointer-events:none}
+            .ss-slider-row {display:flex;align-items:center;gap:12px}
+            .ss-panel .ss-step {width:36px;height:34px;font-size:25px;padding:0;flex-shrink:0}
+            .ss-slider {flex:1;min-width:0}
+            .ss-slider input {width:100%;height:7px!important;padding:0!important;border:1px solid #4d4b84!important;border-radius:20px;appearance:none;background:linear-gradient(90deg,#1e2c42,#31214e)!important;cursor:pointer;accent-color:#9668ff}
+            .ss-slider input::-webkit-slider-thumb {appearance:none;width:20px;height:20px;border-radius:50%;background:#f2eaff;border:3px solid #8c56ff;box-shadow:0 0 12px #8042ff70}
+            .ss-slider input::-moz-range-thumb {width:15px;height:15px;border-radius:50%;background:#f2eaff;border:3px solid #8c56ff;box-shadow:0 0 12px #8042ff70}
+            .ss-timing-actions {display:flex;gap:8px;margin-top:9px}
+            .ss-timing-actions button {height:29px;font-size:11px;padding:4px 13px}
+            .ss-panel .ss-reset {margin-left:auto}
+            .ss-note {font-size:10px;line-height:1.4;color:#8898bb;margin-top:8px!important}
+            .ss-invalid {color:#f4bca2}
+            .ss-feature {display:flex;align-items:center;gap:11px;min-height:62px;padding:10px 12px}
+            .ss-feature .ss-icon {width:27px;height:27px;padding:5px;box-sizing:content-box;background:#3f24af25;border-radius:50%;border:1px solid #5636b329}
+            .ss-feature button {flex-shrink:0;height:33px;padding:5px 13px;font-size:11px}
+            .ss-auto-on {background:radial-gradient(ellipse at 100% 100%,#512ba930,transparent 65%),#0c111b;border-color:#55418d;box-shadow:0 0 18px #693aff12}
+            .ss-toggle {flex-shrink:0;width:42px!important;margin:0!important}
+            .ss-toggle label {font-size:0!important;width:0!important;margin:0!important}
+            .ss-toggle button {width:40px!important;height:23px!important;border-radius:20px!important;background:#30364c!important;border-color:#444b68!important;padding:2px!important}
+            .ss-toggle button[data-state="checked"],.ss-toggle button[aria-checked="true"] {background:#6538f5!important;border-color:#8867ff!important;box-shadow:0 0 14px #693aff44}
+            .ss-toggle button span {width:17px!important;height:17px!important;background:#eeeaff;border-radius:50%;transform:translateX(0)!important}
+            .ss-toggle button[data-state="checked"] span {transform:translateX(15px)!important}
+            .ss-shortcut {font-size:10px;color:#697a9b;text-align:center}
+            @media(max-width:440px) {.ss-panel{padding:9px}.ss-sub{font-size:10px}.ss-heading{font-size:12px}.ss-feature{gap:8px}.ss-find::after{font-size:10px}.ss-panel .ss-find{font-size:16px}.ss-logo{width:46px;height:46px}.ss-title{font-size:25px}.ss-feature button{padding:4px 9px}}
+        `
+        tray.render(() => {
+            const media = ctx.videoCore.getCurrentMedia()
+            const cover = media?.coverImage?.large || media?.coverImage?.medium
+            const busy = searching || loadingTracks > 0
+            const ready = Boolean(mediaId && episode)
+            return tray.stack([
+                tray.css(panelCSS),
+                tray.div([
+                    tray.div([
+                        tray.img({src:"https://raw.githubusercontent.com/DefnoJae/SeaSubs/main/icon.png",alt:"SeaSubs",className:"ss-logo"}),
+                        tray.div([tray.text("SeaSubs",{className:"ss-title"}),tray.text("External Forced / Signs & Songs subtitle fallback.",{className:"ss-sub"})]),
+                    ],{className:"ss-header"}),
+                    tray.div([
+                        tray.img({src:cover || "https://raw.githubusercontent.com/DefnoJae/SeaSubs/main/marketplace-icon.png",alt:cover ? title : "SeaSubs",className:"ss-cover"}),
+                        tray.div([
+                            tray.text(title || "Ready when you are",{className:"ss-anime-title"}),
+                            tray.div([tray.text(episode ? "Episode " + episode : "Start an episode"),tray.text(String(media?.format || "TV").replace(/_/g," "),{className:"ss-format"})],{className:"ss-episode"}),
+                        ],{className:"ss-anime-copy"}),
+                    ],{className:"ss-card ss-anime"}),
+                    tray.button(searching ? "Finding subtitles…" : loadingTracks ? "Loading subtitle…" : "Find external subtitles",{onClick:"seasubs-search",intent:"primary",loading:busy,disabled:busy,className:"ss-find"+(busy ? " ss-busy" : ""),style:{backgroundImage:'url("'+icon("chevron")+'"), radial-gradient(ellipse at 100% 0%,#b47aff80,transparent 52%),linear-gradient(115deg,#4930f4,#293eed 60%,#753eff)',backgroundPosition:"right 15px center,center,center",backgroundSize:"17px,auto,auto",backgroundRepeat:"no-repeat"}}),
+                    tray.button("Choose another subtitle ›",{onClick:"seasubs-choose",disabled:busy,className:"ss-alternatives"}),
+                    tray.div([
+                        tray.div([
+                            tray.img({src:icon("clock"),alt:"",className:"ss-icon"}),
+                            tray.div([tray.text("Subtitle timing adjustment",{className:"ss-heading"}),tray.text("Positive delay shows subtitles later.",{className:"ss-description"})],{className:"ss-grow"}),
+                            tray.input({fieldRef:delayField,placeholder:"0.000",className:"ss-delay",disabled:!ready}),
+                        ],{className:"ss-timing-head"}),
+                        tray.div([
+                            tray.button("−",{onClick:"seasubs-delay-minus",className:"ss-step",disabled:!ready}),
+                            tray.input({fieldRef:sliderField,className:"ss-slider",disabled:!ready}),
+                            tray.button("+",{onClick:"seasubs-delay-plus",className:"ss-step",disabled:!ready}),
+                        ],{className:"ss-slider-row"}),
+                        tray.div([
+                            tray.button("−100ms",{onClick:"seasubs-delay-minus",disabled:!ready}),
+                            tray.button("+100ms",{onClick:"seasubs-delay-plus",disabled:!ready}),
+                            tray.button("↶ Reset",{onClick:"seasubs-delay-reset",className:"ss-reset",disabled:!ready}),
+                        ],{className:"ss-timing-actions"}),
+                        tray.text(parseDelay(String(delayField.current)) === undefined ? "Enter seconds or ms, between −120s and +120s." : "Saved automatically for this anime and sub/dub mode, including next episodes.",{className:"ss-note"+(parseDelay(String(delayField.current)) === undefined ? " ss-invalid" : "")}),
+                    ],{className:"ss-card ss-timing"}),
+                    tray.div([
+                        tray.img({src:icon("sign"),alt:"",className:"ss-icon"}),
+                        tray.div([tray.text("Adjust one subtitle’s timing",{className:"ss-heading"}),tray.text("Pause near a sign; adjust only that sign.",{className:"ss-description"})],{className:"ss-grow"}),
+                        tray.button("Adjust sign",{onClick:"seasubs-sign-timing",disabled:!ready || busy}),
+                    ],{className:"ss-card ss-feature"}),
+                    tray.div([
+                        tray.img({src:icon("settings"),alt:"",className:"ss-icon"}),
+                        tray.div([tray.text("Automatic Signs & Songs",{className:"ss-heading"}),tray.text("Continue on this anime’s next episodes.",{className:"ss-description"})],{className:"ss-grow"}),
+                        tray.switch({label:"Automatic Signs & Songs",fieldRef:followField,disabled:!ready,className:"ss-toggle"}),
+                    ],{className:"ss-card ss-feature"+(followPreference().enabled ? " ss-auto-on" : "")}),
+                    tray.text("Ctrl/Cmd + Shift + S · Find subtitles",{className:"ss-shortcut"}),
+                ],{className:"ss-panel"}),
+            ],{gap:0})
+        })
     })
 }

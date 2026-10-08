@@ -11,14 +11,18 @@ function harness(fetch, storage = new Map()) {
     let playback = { id: 'episode-a', subtitleTracks: [], onlinestreamParams: { episodeNumber: 4, dubbed: true } };
     let media = {id:154692,title:{english:'Girlfriend, Girlfriend Season 2'}};
     const listeners = new Map(), handlers = new Map(), timers = new Map(); let nextTimer = 0;
+    const observers=new Map();let domReady;
     const fields = []; let trayRender, position = 10;
-    const tray = {update() {}, render(fn) {trayRender=fn},flex:items=>({items}),stack:items=>items,text:text=>({text}),input:props=>({input:props}),button:(label,props)=>({label,...props})};
+    const layout=(items,props)=>({items,...props});
+    const tray = {update() {}, render(fn) {trayRender=fn},flex:layout,stack:layout,div:layout,
+        css:css=>({css}),img:props=>({image:props}),switch:props=>({switch:props}),
+        text:(text,props)=>({text,...props}),input:props=>({input:props}),button:(label,props)=>({label,...props})};
     const ctx = { fetch, newTray: () => tray, newCommandPalette: () => palette,
-        fieldRef:value=>{const ref={current:value,setValue(v){this.current=v}};fields.push(ref);return ref},
+        fieldRef:value=>{let change;const ref={current:value,setValue(v){this.current=v},onValueChange(fn){change=fn},userChange(v){this.current=v;change?.(v)}};fields.push(ref);return ref},
         toast: Object.fromEntries(['success','warning','error','info'].map(k => [k, x => messages.push(x)])),
         videoCore: { getCurrentPlaybackInfo: () => playback, getCurrentMedia: () => media,
             getPlaybackStatus:()=>({currentTime:position}),getPlaybackState: () => ({playbackInfo:playback}), addExternalSubtitleTrack: t => injected.push(t), showMessage() {}, addEventListener:(name,fn) => listeners.set(name,fn) },
-        playback:{ registerEventListener() {} }, dom:{ onReady() {} }, screen:{ onNavigate() {}, loadCurrent() {} },
+        playback:{ registerEventListener() {} }, dom:{ onReady(fn) {domReady=fn},observe:(selector,fn)=>observers.set(selector,fn) }, screen:{ onNavigate() {}, loadCurrent() {} },
         anime:{ getAnimeMetadata: async () => ({episodes:{4:{anidbId:271605},5:{anidbId:271606},6:{anidbId:271607}}}) },
         setTimeout:(fn) => {const id = ++nextTimer; timers.set(id,fn); return () => timers.delete(id)},
         registerEventHandler:(name,fn) => handlers.set(name,fn) };
@@ -35,13 +39,56 @@ function harness(fetch, storage = new Map()) {
     vm.runInContext('(' + callback + ').call(undefined, __ctx)', sandbox);
     sandbox.testHooks.syncFromVideoCore();
     return { sandbox, hooks:sandbox.testHooks, palette, injected, messages, storage,
-        fields,renderTray:()=>trayRender(),setPosition:value=>{position=value},
+        fields,renderTree:()=>trayRender(),renderTray:()=>{const nodes=[];function walk(n){if(!n)return;if(Array.isArray(n)){n.forEach(walk);return}nodes.push(n);n.items?.forEach(walk)}walk(trayRender());return nodes},setPosition:value=>{position=value},
+        observers,runDomReady:()=>domReady(),
         setTracks:tracks => {playback.subtitleTracks = tracks},
         change:(ep=4,mediaId=154692,dub=true) => {playback = {...playback,id:'episode-'+ep,onlinestreamParams:{episodeNumber:ep,dubbed:dub}}; media={...media,id:mediaId}},
         emit:name => listeners.get(name)?.({}), handle:name => handlers.get(name)?.(),
         flushTimers:() => {const fns=[...timers.values()]; timers.clear(); for(const fn of fns) fn()} };
 }
 const response = text => ({ok:true,status:200,text:() => text,json:() => JSON.parse(text)});
+test('slider adaptation is scoped, accessible, bounded and restores exact delays after expansion', () => {
+    const h=harness();h.runDomReady();
+    const writes=[],input={attributes:{},setAttribute(k,v){writes.push(k);this.attributes[k]=v},setProperty(k,v){this[k]=v}};
+    const adapt=h.observers.get('.ss-slider input');adapt([input]);
+    assert.equal(input.attributes.type,'range');assert.equal(input.attributes.min,'-5');assert.equal(input.attributes.max,'5');
+    assert.equal(input.attributes.step,'0.1');assert.equal(input.attributes['aria-label'],'Subtitle delay in seconds');
+    const before=writes.length;adapt([input]);assert.equal(writes.length,before);
+    h.fields[0].userChange('120');adapt([input]);
+    assert.equal(input.attributes.max,'120');assert.equal(input.value,'120');
+    h.fields[0].userChange('-30.125');adapt([input]);assert.equal(input.attributes.min,'-32');assert.equal(input.value,'-30.125');
+});
+test('native timing inputs autosave exact and slider values without compounding or success spam', async () => {
+    const h=harness();
+    await h.hooks.loadCandidate({label:'Signs',url:'',content:timingAss(timingSample()),type:'ass',language:'en',score:1000,mode:'direct',playback:h.hooks.playbackKey()});
+    const before=h.messages.length;
+    h.fields[0].userChange('1250ms');
+    assert.equal(h.storage.get('timing-delay-154692|true'),1250);
+    assert.equal(h.fields[1].current,'1.250');
+    assert.equal(h.hooks.timingCues(h.injected.at(-1).content)[0].start,11.25);
+    const injections=h.injected.length;
+    h.fields[1].userChange('1.250');assert.equal(h.injected.length,injections);
+    h.fields[1].userChange('-0.100');
+    assert.equal(h.fields[0].current,'-0.100');
+    assert.equal(h.hooks.timingCues(h.injected.at(-1).content)[0].start,9.9);
+    h.fields[0].userChange('invalid');h.fields[0].userChange('121');
+    assert.equal(h.storage.get('timing-delay-154692|true'),-100);
+    assert.equal(h.messages.length,before);
+    h.change(5);h.hooks.syncFromVideoCore();assert.equal(h.fields[1].current,'-0.100');
+    h.change(5,10165);h.hooks.syncFromVideoCore();assert.equal(h.fields[1].current,'0.000');
+});
+test('native automation switch saves and restores anime-specific state and cancels pending following', () => {
+    const h=harness();h.fields[2].userChange(true);
+    assert.equal(h.storage.get('follow-154692|true').enabled,true);
+    assert.equal(h.fields[2].current,true);
+    h.fields[2].userChange(false);
+    assert.equal(h.storage.get('follow-154692|true').enabled,false);
+    assert.equal(h.fields[2].current,false);
+    h.fields[2].userChange(true);
+    h.change(1,10165);h.hooks.syncFromVideoCore();assert.equal(h.fields[2].current,false);
+    h.change(4);h.hooks.syncFromVideoCore();assert.equal(h.fields[2].current,true);
+    const reloaded=harness(undefined,h.storage);assert.equal(reloaded.fields[2].current,true);
+});
 test('real Tsukigakirei batch maps Episode 1 to its own attachment and visible poster sign', () => {
     const h = harness(); h.change(1,98202); h.hooks.syncFromVideoCore();
     const batch = JSON.parse(fs.readFileSync(path.join(__dirname,'fixtures/tsuki-batch.json')));
