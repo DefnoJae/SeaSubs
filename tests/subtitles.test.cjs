@@ -35,7 +35,7 @@ function harness(fetch, storage = new Map()) {
     vm.createContext(rootSandbox);
     let code = fs.readFileSync(path.join(root,'code.ts'),'utf8');
     code = code.replace('ctx.registerEventHandler("seasubs-search",',
-        'globalThis.testHooks = {presentSearchResults,readCandidate,shiftSign,offsetTrack,parseDelay,animeDelay,applyAnimeDelay,openSignTiming,compareTiming, timingCues, unwrapProviderUrl, prepareTiming, rankTiming, loadCandidate, collectSubtitleAttachments, SeaSubsXZ, parseVtt, inferDubCompanion, deriveVtt, currentCandidates, runSearch, search, scheduleAuto, searchAnimeToshoHost, deriveSignsSongsAss, inspectCandidates, syncFromVideoCore, showCandidates, playbackKey}; ctx.registerEventHandler("seasubs-search",');
+        'globalThis.testHooks = {matchesRelease,inspectSignsRole,presentSearchResults,readCandidate,shiftSign,offsetTrack,parseDelay,animeDelay,applyAnimeDelay,openSignTiming,compareTiming, timingCues, unwrapProviderUrl, prepareTiming, rankTiming, loadCandidate, collectSubtitleAttachments, SeaSubsXZ, parseVtt, inferDubCompanion, deriveVtt, currentCandidates, runSearch, search, scheduleAuto, searchAnimeToshoHost, deriveSignsSongsAss, inspectCandidates, syncFromVideoCore, showCandidates, playbackKey}; ctx.registerEventHandler("seasubs-search",');
     vm.runInContext(ts.transpileModule(code, {compilerOptions:{target:ts.ScriptTarget.ES2018}}).outputText, rootSandbox);
     rootSandbox.init();
     // Seanime serializes the callback and evaluates it in a separate UI VM.
@@ -53,6 +53,53 @@ function harness(fetch, storage = new Map()) {
         flushTimers:() => {const fns=[...timers.values()]; timers.clear(); for(const fn of fns) fn()} };
 }
 const response = text => ({ok:true,status:200,text:() => text,json:() => JSON.parse(text)});
+test('explicit season and episode mismatches are excluded even from single-file top-level attachments', () => {
+    const h=harness();
+    assert.equal(h.hooks.matchesRelease('[Release]_S02E04.ass'),true);
+    assert.equal(h.hooks.matchesRelease('[Release]_S01E04.ass'),false);
+    assert.equal(h.hooks.matchesRelease('[Release]_S02E05.ass'),false);
+    const attachment={id:1,type:'subtitle'};
+    assert.equal(h.hooks.collectSubtitleAttachments({title:'Title S01E04',attachments:[attachment]}).length,0);
+    assert.equal(h.hooks.collectSubtitleAttachments({files:[{filename:'Title S02E05.mkv'}],attachments:[attachment]}).length,0);
+    const batch=h.hooks.collectSubtitleAttachments({title:'Title S02E01-E12',files:[{filename:'Title_S02E04.mkv',attachments:[attachment]},{filename:'Title_S02E05.mkv',attachments:[{...attachment,id:2}]}]});
+    assert.equal(batch.length,1);assert.equal(batch[0].id,1);
+    h.change(1,185262);h.setMedia({id:185262,title:{english:'HELL MODE'}});h.hooks.syncFromVideoCore();
+    assert.equal(h.hooks.matchesRelease('[Judas] Hell Mode - S02E01 [1080p]'),false);
+    assert.equal(h.hooks.matchesRelease('HELL.MODE.S01E01.REPACK'),true);
+});
+test('wider search reads usable alternatives before slow providers and reuses detail metadata', async () => {
+    const calls=[],content=timingAss(timingSample());
+    const h=harness(async url=>{
+        calls.push(url);
+        if(url.endsWith('eid=271605'))return response(JSON.stringify([{id:1,title:'Wrong S03E04'},{id:2,title:'Correct S02E04'}]));
+        if(url.endsWith('show=torrent&id=2'))return response(JSON.stringify({title:'Correct S02E04',attachments:[{id:99,type:'subtitle',url:'https://fixture.test/signs.ass',info:{lang:'eng',name:'Signs',codec:'ass'}}]}));
+        if(url==='https://fixture.test/signs.ass')return response(content);
+        throw Error('Unexpected fallback request '+url);
+    });
+    await h.hooks.runSearch(false,true);
+    assert.equal(calls.length,3);assert.equal(h.injected.length,0);assert.match(h.palette.items[0].label,/Correct S02E04/);
+    await h.hooks.runSearch(false,true);assert.equal(calls.length,3);
+});
+test('SRT references can verify timing and edits retain comma timestamps and other cues', () => {
+    const h=harness(),cues=timingSample();
+    const srt=vtt(cues).replace('WEBVTT\n\n','').replace(/(\d{2}:\d{2}:\d{2})\.(\d{3})/g,'$1,$2');
+    assert.equal(h.hooks.timingCues(srt).length,5);
+    const reference=srt.replace('00:00:10,000','00:00:11,000').replace('00:00:12,000','00:00:13,000');
+    const compared=h.hooks.compareTiming(srt,reference);assert.equal(compared.adjusted,1);assert.match(compared.content,/00:00:11,000 --> 00:00:13,000/);
+    const shifted=h.hooks.shiftSign(srt,h.hooks.timingCues(srt)[0],0.25);assert.equal(shifted.changed,1);assert.match(shifted.content,/00:00:10,250 --> 00:00:12,250/);
+    assert.equal(h.hooks.timingCues(shifted.content)[1].start,50);
+});
+test('paused-position sign alignment includes saved delay and changes only the selected sign', async () => {
+    const h=harness();await h.hooks.loadCandidate({label:'Signs',url:'',content:timingAss(timingSample()),type:'ass',language:'en',score:1000,mode:'direct',playback:h.hooks.playbackKey()});
+    h.hooks.applyAnimeDelay(1250);h.setPosition(14);h.handle('seasubs-sign-timing');h.palette.items[0].onSelect();
+    h.palette.items.find(i=>i.value==='align').onSelect();
+    assert.deepEqual(Array.from(h.hooks.timingCues(h.injected.at(-1).content),c=>c.start),[14,51.25,111.25,161.25,211.25]);
+});
+test('dense plain captions mislabeled Forced require explicit selection', () => {
+    const h=harness(),content=timingAss(Array.from({length:100},(_,i)=>({start:i*5,end:i*5+2,text:'ordinary spoken dialogue '+i}))).replace(/Style: Signs/g,'Style: Default').replace(/,Signs,,/g,',Default,,').replace(/\{\\pos\(100,200\)\}/g,'');
+    const result=h.hooks.inspectSignsRole({label:'★ Forced — English',type:'ass',score:1200,mode:'direct'},content);
+    assert.equal(result.score,0);assert.match(result.label,/Unverified captions/);
+});
 test('restore returns to original tracks, pauses following and retains the baseline across repeated injections', async () => {
     const h=harness(),track={label:'Signs',url:'',content:'1\n00:01:00,000 --> 00:01:02,000\nSign',type:'srt',language:'en',score:1000,mode:'direct',playback:h.hooks.playbackKey()};
     h.setOriginal(3,1);await h.hooks.loadCandidate(track);

@@ -2,6 +2,15 @@
 
 Seanime plugin for external English Forced / Signs & Songs subtitles. Adds only subtitle tracks through VideoCore; preserves your current video provider, quality and audio.
 
+## v0.14.0 source filtering, faster alternatives and sign alignment
+
+- Rejects explicit season/episode mismatches in release titles and single/batch filenames. Uses episode metadata's season when available, otherwise the title's explicit season or Season 1. Keeps matching episode ranges in batch releases.
+- Wider search reads existing AnimeTosho alternatives before falling back to slow providers. Release details are cached for five minutes; up to four candidate reads and three Vidnest backend requests run concurrently. Successful alternatives avoid unnecessary alternate-host/Animeya requests.
+- Allows AnimeTosho's observed `storage.animetosho.net/releases/` subtitle path. Animeya downloads use provider-supplied Referer/Origin/User-Agent headers where available and skip AI-labeled subtitles. CDN 403 responses still fail closed; access is not guaranteed.
+- SRT is now included in timing comparison and per-sign editing, preserving comma timestamps. Dense plain tracks labeled Forced are kept for explicit selection when their content lacks sufficient signs evidence.
+- **Adjust sign → Align this sign's start to the paused video position** moves only the selected cue and matching layers, accounting for the saved anime delay. Adds ±2/5/8-second steps. Without a readable provider reference, automatic timing remains unverified rather than guessing an offset from screenshots.
+- Regression checks cover wrong-season/episode exclusion, batch ranges, wider search request ordering/cache reuse, SRT format-preserving comparison/edits, explicit caption selection and paused-position alignment.
+
 ## v0.13.0 restore original subtitles
 
 - Adds **Restore original subtitles** beneath the selected source. Captures the player's subtitle and media-caption selections before the first SeaSubs injection in an episode, preserving that baseline across alternatives and timing changes.

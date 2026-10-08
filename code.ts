@@ -61,8 +61,14 @@ buffer/index.js:
         }
 
         type TimingCue = { start: number, end: number, text: string, line: number, fields?: string[], startIndex?: number, endIndex?: number }
-        function timingCues(content: string, includeDrawings = false): TimingCue[] {
+        function parseTextCues(content: string): VttCue[] {
             const vtt = parseVtt(content)
+            if (vtt.length) return vtt
+            const normalized = content.replace(/(\d{2}:\d{2}:\d{2}),(\d{3})/g,"$1.$2")
+            return parseVtt("WEBVTT\n\n"+normalized.replace(/^\uFEFF/,"")).map(cue => ({...cue,block:cue.block.replace(/(\d{2}:\d{2}:\d{2})\.(\d{3})/g,"$1,$2")}))
+        }
+        function timingCues(content: string, includeDrawings = false): TimingCue[] {
+            const vtt = parseTextCues(content)
             if (vtt.length) return vtt.map((c, i) => ({ ...c, line: i }))
             const out: TimingCue[] = []
             let events = false, format: string[] = []
@@ -106,15 +112,15 @@ buffer/index.js:
             const stamp = (s: number, ass: boolean) => {
                 const units = ass ? 100 : 1000, ticks = Math.round(s * units)
                 const sec = Math.floor(ticks / units), h = Math.floor(sec / 3600), m = Math.floor(sec / 60) % 60
-                return (ass ? String(h) : ("0" + h).slice(-2)) + ":" + ("0" + m).slice(-2) + ":" + ("0" + sec % 60).slice(-2) + "." + (String(ticks % units).padStart(ass ? 2 : 3, "0"))
+                return (ass ? String(h) : ("0" + h).slice(-2)) + ":" + ("0" + m).slice(-2) + ":" + ("0" + sec % 60).slice(-2) + (!ass && /\d{2}:\d{2}:\d{2},\d{3}\s+-->/.test(content) ? "," : ".") + (String(ticks % units).padStart(ass ? 2 : 3, "0"))
             }
-            if (parseVtt(content).length) {
-                const parsed = parseVtt(content)
+            if (parseTextCues(content).length) {
+                const parsed = parseTextCues(content)
                 let cueIndex = 0
                 const blocks = content.replace(/^\uFEFF/, "").replace(/\r\n?/g, "\n").split(/\n\s*\n/).map(block => {
                     if (!parsed.some(c => c.block === block)) return block
                     const ref = replacements[cueIndex++]
-                    return ref ? block.replace(/((?:\d{2,}:)?\d{2}:\d{2}\.\d{3})\s+-->\s+((?:\d{2,}:)?\d{2}:\d{2}\.\d{3})/, stamp(ref.start, false) + " --> " + stamp(ref.end, false)) : block
+                    return ref ? block.replace(/((?:\d{2,}:)?\d{2}:\d{2}[.,]\d{3})\s+-->\s+((?:\d{2,}:)?\d{2}:\d{2}[.,]\d{3})/, stamp(ref.start, false) + " --> " + stamp(ref.end, false)) : block
                 })
                 return { content: blocks.join("\n\n"), matched: matches.length, adjusted }
             }
@@ -160,7 +166,7 @@ buffer/index.js:
         const API_KEY = "{{apiKey}}"
         const PREFER_FORCED = String("{{preferForced}}") !== "false"
         const API = "https://api.opensubtitles.com/api/v1"
-        const UA = "SeaSubs v0.13.0"
+        const UA = "SeaSubs v0.14.0"
 
         let title = ""
         let episode = 0
@@ -250,7 +256,7 @@ buffer/index.js:
                 for (const cue of vtt) replacements[cue.block] = cue.end + delta <= 0 ? "" : cue.block.replace(/((?:\d{2,}:)?\d{2}:\d{2}\.\d{3})\s+-->\s+((?:\d{2,}:)?\d{2}:\d{2}\.\d{3})/,stamp(cue.start + delta,false)+" --> "+stamp(cue.end + delta,false))
                 return content.replace(/^\uFEFF/,"").replace(/\r\n?/g,"\n").split(/\n\s*\n/).map(b => replacements[b] === undefined ? b : replacements[b]).filter(Boolean).join("\n\n")
             }
-            const cues = timingCues(content,true), lines = content.replace(/^\uFEFF/,"").split(/\r?\n/)
+            const cues = timingCues(content,true).filter(cue => !!cue.fields), lines = content.replace(/^\uFEFF/,"").split(/\r?\n/)
             for (const cue of cues) {
                 if (cue.end + delta <= 0) { lines[cue.line] = ""; continue }
                 const fields = cue.fields!.slice()
@@ -478,7 +484,17 @@ buffer/index.js:
             return s
         }
 
+        let metadataSeason = 0, metadataSeasonKey = ""
+        function matchesRelease(value: string): boolean {
+            const match = value.match(/(?:^|[^a-z0-9])S(\d{1,2})[ ._-]*E(\d{1,3}(?:\.\d+)?)(?=[ ._\-[\]]|$)/i)
+            if (!match) return true
+            const titleSeason = title.match(/(?:\bseason\s*|\bS)(\d+)\b/i) || title.match(/\b(\d+)(?:st|nd|rd|th)\s+season\b/i)
+            const season = metadataSeasonKey === seriesKey() && metadataSeason > 0 ? metadataSeason : Number(titleSeason?.[1] || 1)
+            const range = value.slice(match.index || 0).match(/S\d{1,2}[ ._-]*E\d{1,3}\s*[-~]\s*E?(\d{1,3})/i)
+            return Number(match[1]) === season && (range ? episode >= Number(match[2]) && episode <= Number(range[1]) : Number(match[2]) === episode)
+        }
         function collectSubtitleAttachments(torrent: any): any[] {
+            if (!matchesRelease(String(torrent?.title || torrent?.torrent_name || ""))) return []
             const out: any[] = []
             const seen: Record<string, boolean> = {}
             const add = (items: any[]) => {
@@ -491,11 +507,14 @@ buffer/index.js:
                 }
             }
             const files = torrent?.files || []
+            if (files.length === 1 && !matchesRelease(String(files[0].filename || files[0].name || ""))) return []
             // Batch file order is arbitrary. Never take another episode's subtitles.
             if (files.length <= 1) add(torrent?.attachments || [])
             for (const file of files) {
                 const filename = String(file.filename || file.name || "").split(/[\\/]/).pop() || ""
-                const match = filename.match(/(?:\s-\s|\bEpisode\s+|\bE)(\d{1,3}(?:\.\d+)?)(?:v\d+)?(?=[\s[._-]|$)/i)
+                if (!matchesRelease(filename)) continue
+                const match = filename.match(/(?:^|[^a-z0-9])S\d{1,2}[ ._-]*E(\d{1,3}(?:\.\d+)?)(?:v\d+)?(?=[\s[._-]|$)/i)
+                    || filename.match(/(?:\s-\s|\bEpisode\s+|\bE)(\d{1,3}(?:\.\d+)?)(?:v\d+)?(?=[\s[._-]|$)/i)
                 if (match && Number(match[1]) !== episode) continue
                 if (files.length > 1 && !match) continue
                 add(file?.attachments || [])
@@ -525,7 +544,7 @@ buffer/index.js:
             }
             if (key !== playbackKey()) return []
             const candidates = (Array.isArray(entries) ? entries : [])
-                .filter((e: any) => !e.status || e.status === "complete")
+                .filter((e: any) => (!e.status || e.status === "complete") && matchesRelease(String(e.title || "")))
                 .sort((a: any, b: any) => {
                     const hint = followPreference().releaseHint
                     const rank = (e: any) => (hint && String(e.title || "").includes("[" + hint + "]") ? 10 : 0)
@@ -537,9 +556,15 @@ buffer/index.js:
                 .slice(0, 12)
             const details = await Promise.all((expanded ? candidates.slice(1) : candidates.slice(0, 1)).map(async (entry: any) => {
                 try {
-                    const r = await ctx.fetch(detailBase + entry.id, { timeout: 8 })
+                    const detailUrl = detailBase + entry.id
+                    const saved = feedCache[detailUrl]
+                    if (saved && Date.now()-saved.time < 300000) return {torrent:saved.rows[0],entry}
+                    const r = await ctx.fetch(detailUrl, { timeout: 6 })
                     if (!r.ok) return null
-                    return { torrent: r.json() as any, entry }
+                    const torrent = r.json() as any
+                    feedCache[detailUrl] = {time:Date.now(),rows:[torrent]}
+                    if (Object.keys(feedCache).length > 24) delete feedCache[Object.keys(feedCache)[0]]
+                    return { torrent, entry }
                 } catch (_) { return null }
             }))
             const out: AnimeToshoResult[] = []
@@ -588,6 +613,8 @@ buffer/index.js:
                 const metadata = await ctx.anime.getAnimeMetadata("anilist", requestedMedia)
                 if (key !== playbackKey()) return []
                 const epMeta = metadata?.episodes?.[String(requestedEpisode)]
+                metadataSeason = Number(epMeta?.seasonNumber || 0)
+                metadataSeasonKey = seriesKey()
                 const eid = Number(epMeta?.anidbId || 0)
                 if (!eid) return []
                 const sources: AnimeToshoResult[][] = []
@@ -599,12 +626,23 @@ buffer/index.js:
                             const list = await searchAnimeToshoHost(host, eid, expanded)
                             sources.push(list)
                             const direct = list.filter(i => i.mode === "direct").sort((a, b) => b.score - a.score)
+                            if (wider && direct.length) {
+                                const readable: AnimeToshoResult[] = await Promise.all(direct.slice(0,4).map(async item => inspectSignsRole(item,await readCandidate(item))))
+                                if (key !== playbackKey()) return []
+                                sources[sources.length-1] = readable.filter(item => !!item.content).concat(list.filter(item => !direct.slice(0,4).some(loaded => loaded.url === item.url)))
+                            }
+                            if (wider && expanded) {
+                                const choices = sources.reduce((out,source) => out.concat(source),[] as AnimeToshoResult[])
+                                if (choices.some(item => !!item.content && item.mode === "direct")) return choices
+                            }
                             for (const item of (wider ? [] : direct)) {
                                 const content = await readCandidate(item)
                                 if (key !== playbackKey()) return []
                                 if (content) {
                                     console.log("SeaSubs fast Signs match", { source: item.label, events: (content.match(/^Dialogue\s*:/gm) || []).length })
-                                    return [{ ...item, content }]
+                                    const inspected = inspectSignsRole(item,content)
+                                    if (inspected.score >= 500) return [inspected]
+                                    sources[sources.length-1] = sources[sources.length-1].map(candidate => candidate === item ? inspected : candidate)
                                 }
                             }
                             if (!wider) for (const item of list.filter(i => i.mode === "derive").slice(0, 2)) {
@@ -637,6 +675,16 @@ buffer/index.js:
                 console.log("SeaSubs AnimeTosho search failed", err)
                 return []
             }
+        }
+
+        function inspectSignsRole(item: AnimeToshoResult, content: string): AnimeToshoResult {
+            const count = timingCues(content).length
+            const signs = /\[Events\]/i.test(content) ? deriveSignsSongsAss(content).count : deriveVtt(content).count
+            // A dense plain track with little sign evidence can be mislabeled
+            // Forced. Keep it selectable, but never silently choose/follow it.
+            if (count > 80 && signs < count * 0.35) return {...item,content,score:0,
+                label:"Unverified captions — " + item.label.replace(/^★\s*(?:Forced — )?/,"")}
+            return {...item,content}
         }
 
         function injectExternal(src: string, label: string, language: string, type: string): void {
@@ -786,13 +834,13 @@ buffer/index.js:
             const stamp = (s: number, ass: boolean) => {
                 const units = ass ? 100 : 1000, ticks = Math.round(s * units), whole = Math.floor(ticks / units)
                 return (ass ? String(Math.floor(whole / 3600)) : String(Math.floor(whole / 3600)).padStart(2,"0")) + ":"
-                    + String(Math.floor(whole / 60) % 60).padStart(2,"0") + ":" + String(whole % 60).padStart(2,"0") + "." + String(ticks % units).padStart(ass ? 2 : 3,"0")
+                    + String(Math.floor(whole / 60) % 60).padStart(2,"0") + ":" + String(whole % 60).padStart(2,"0") + (!ass && /\d{2}:\d{2}:\d{2},\d{3}\s+-->/.test(content) ? "," : ".") + String(ticks % units).padStart(ass ? 2 : 3,"0")
             }
-            const vtt = parseVtt(content)
+            const vtt = parseTextCues(content)
             if (vtt.length) {
                 const indexes = matches.map(c => c.line)
                 const replacements: Record<string, string> = Object.create(null)
-                for (const i of indexes) replacements[vtt[i].block] = vtt[i].block.replace(/((?:\d{2,}:)?\d{2}:\d{2}\.\d{3})\s+-->\s+((?:\d{2,}:)?\d{2}:\d{2}\.\d{3})/,
+                for (const i of indexes) replacements[vtt[i].block] = vtt[i].block.replace(/((?:\d{2,}:)?\d{2}:\d{2}[.,]\d{3})\s+-->\s+((?:\d{2,}:)?\d{2}:\d{2}[.,]\d{3})/,
                     stamp(vtt[i].start + seconds,false) + " --> " + stamp(vtt[i].end + seconds,false))
                 return { content: content.replace(/^\uFEFF/, "").replace(/\r\n?/g,"\n").split(/\n\s*\n/).map(b => replacements[b] || b).join("\n\n"), changed: matches.length }
             }
@@ -822,16 +870,18 @@ buffer/index.js:
                 value: "sign-" + index, heading: index === 0 ? "Choose the sign to adjust" : undefined,
                 onSelect: () => {
                     if (key !== playbackKey() || activeSubtitle !== item) return
-                    palette.setItems([-1,-0.5,0.5,1].map(seconds => ({ label: (seconds > 0 ? "Show later by " : "Show earlier by ") + Math.abs(seconds) + " seconds",
-                        value: String(seconds), onSelect: () => {
+                    palette.setItems([0,-8,-5,-2,-1,-0.5,0.5,1,2,5,8].map(seconds => ({ label: seconds === 0 ? "Align this sign’s start to the paused video position" : (seconds > 0 ? "Show later by " : "Show earlier by ") + Math.abs(seconds) + " seconds",
+                        value: seconds === 0 ? "align" : String(seconds), onSelect: () => {
                             syncFromVideoCore()
                             if (key !== playbackKey() || activeSubtitle !== item) { ctx.toast.warning("SeaSubs: track or episode changed; choose the sign again."); return }
-                            const shifted = shiftSign(item.content!,cue,seconds)
+                            const shifted = shiftSign(item.content!,cue,seconds === 0 ? baselineTime-cue.start : seconds)
                             if (!shifted.changed) { ctx.toast.warning("SeaSubs: that adjustment would start before the video."); return }
-                            const edited = { ...item, content: shifted.content, manualTiming: true,
+                            const edited = { ...item, content: shifted.content, manualTiming: true, timingMatched:0,
                                 label: item.label.replace(/ — timing (?:matches provider|adjusted to provider|unverified|edited)$/, "") + " — timing edited" }
                             emitSubtitle(edited)
                             activeSubtitle = edited
+                            searchStatus = seconds === 0 ? "Selected sign aligned to the paused position." : "Selected sign timing edited."
+                            tray.update()
                             cacheTrack(edited)
                             const list = resultLists[episodeKey()]
                             const sourceLabel = (label: string) => label.replace(/ — timing (?:matches provider|adjusted to provider|unverified|edited)$/, "")
@@ -1109,7 +1159,7 @@ buffer/index.js:
                 for (const player of players.slice(0, 10)) {
                     const match = String(player?.url || "").match(/^https:\/\/vidnest\.fun\/(anime|animepahe)\/(\d+)\/(\d+)\/(sub|dub)(?:[/?#]|$)/i)
                     if (!match) continue
-                    for (const backend of ["anitaku", "aniwave", "megaplay"]) {
+                    await Promise.all(["anitaku", "aniwave", "megaplay"].map(async backend => {
                         try {
                             const route = backend === "anitaku" ? "hianime/anime/" : backend === "aniwave" ? "aniwave_hls/" : "animehub/"
                             const suffix = backend === "anitaku" ? "/hd-2" : ""
@@ -1118,7 +1168,7 @@ buffer/index.js:
                                 headers: { "Referer": String(player.url), "User-Agent": "Mozilla/5.0" },
                                 timeout: 6,
                             })
-                            if (!rr.ok) continue
+                            if (!rr.ok) return
                             const data = animeyaDecodeCipher(rr.json() as any)
                             const tracks = ([] as any[]).concat(data?.subtitles || [], data?.tracks || [])
                             for (const source of (data?.sources || data?.multiSrc || [])) {
@@ -1136,6 +1186,7 @@ buffer/index.js:
                             for (const track of tracks) {
                                 if (track?.kind && !["captions", "subtitles"].includes(track.kind)) continue
                                 const label = String(track?.label || track?.language || track?.lang || track?.name || track?.title || "")
+                                if (/\bAI\b|machine.?translated|auto.?translated/i.test(label)) continue
                                 const forcedFlag = track?.forced === true || track?.forced === 1 || String(track?.forced || "").toLowerCase() === "true"
                                 const forced = forcedFlag || /forced|signs?|songs?|foreign.?parts/i.test(label)
                                 const english = /english|\beng\b|^en(?:[-_]|$)/i.test(label) || !label
@@ -1146,13 +1197,16 @@ buffer/index.js:
                                 if (seen[key]) continue
                                 seen[key] = true
                                 const type = /\.ass(?:[?#]|$)/i.test(url) ? "ass" : /\.ssa(?:[?#]|$)/i.test(url) ? "ssa" : /\.srt(?:[?#]|$)/i.test(url) ? "srt" : "vtt"
+                                const fetchHeaders: Record<string,string> = {Referer:String(player.url),Origin:"https://vidnest.fun"}
+                                const suppliedHeaders = track?.headers || data?.headers || {}
+                                for (const name of Object.keys(suppliedHeaders)) if (/^(origin|referer|user-agent)$/i.test(name) && typeof suppliedHeaders[name] === "string") fetchHeaders[name] = suppliedHeaders[name]
                                 found.push({
                                     label: (forced ? "★ " : "") + "Animeya " + match[4] + " — " + (label || "English"),
-                                    url, type, language: "en", score: forced ? 3000 : 0, mode: "direct", sourceMode: match[4],
+                                    url, type, language: "en", score: forced ? 3000 : 0, mode: "direct", sourceMode: match[4], fetchHeaders,
                                 })
                             }
                         } catch (err) { console.log("SeaSubs Vidnest failed", backend, String(err)) }
-                    }
+                    }))
                 }
                 return await inspectCandidates(found)
             } catch (err) {
