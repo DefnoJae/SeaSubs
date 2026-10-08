@@ -60,6 +60,75 @@ buffer/index.js:
                 .replace(/\s+/g, " ").trim().toLowerCase()
         }
 
+        type TimingCue = { start: number, end: number, text: string, line: number, fields?: string[], startIndex?: number, endIndex?: number }
+        function timingCues(content: string): TimingCue[] {
+            const vtt = parseVtt(content)
+            if (vtt.length) return vtt.map((c, i) => ({ ...c, line: i }))
+            const out: TimingCue[] = []
+            let events = false, format: string[] = []
+            content.replace(/^\uFEFF/, "").split(/\r?\n/).forEach((line, index) => {
+                if (/^\[/.test(line)) { events = /^\[Events\]/i.test(line); return }
+                if (!events) return
+                if (/^Format:/i.test(line)) { format = line.slice(line.indexOf(":") + 1).split(",").map(s => s.trim().toLowerCase()); return }
+                if (!/^Dialogue:/i.test(line) || !format.length) return
+                const fields = splitAssFields(line.slice(line.indexOf(":") + 1), format.length)
+                const startIndex = format.indexOf("start"), endIndex = format.indexOf("end"), textIndex = format.indexOf("text")
+                if (startIndex < 0 || endIndex < 0 || textIndex < 0) return
+                const stamp = (s: string) => s.trim().split(":").reduce((n, v) => n * 60 + Number(v), 0)
+                const start = stamp(fields[startIndex]), end = stamp(fields[endIndex])
+                if (Number.isFinite(start) && end > start && !/\\p[1-9]/.test(fields[textIndex])) out.push({ start, end, text: stripAssTags(fields[textIndex]), line: index, fields, startIndex, endIndex })
+            })
+            return out
+        }
+
+        function compareTiming(content: string, reference: string): { content: string, matched: number, adjusted: number } {
+            const cues = timingCues(content), refs = timingCues(reference)
+            const normalize = (s: string) => cueText(stripAssTags(s)).replace(/[^a-z0-9\u0080-\uffff]+/g, " ").trim()
+            const index: Record<string, TimingCue[]> = Object.create(null)
+            for (const cue of refs) {
+                const text = normalize(cue.text)
+                if (text.length < 8) continue // Short repeated titles are ambiguous.
+                const matches = index[text] || (index[text] = [])
+                if (!matches.some(c => Math.abs(c.start - cue.start) < 0.05 && Math.abs(c.end - cue.end) < 0.05)) matches.push(cue)
+            }
+            const matches = cues.map(c => ({ cue: c, refs: index[normalize(c.text)] || [] }))
+                .filter(m => m.refs.length === 1 && Math.abs(m.cue.start - m.refs[0].start) <= 5
+                    && Math.abs(m.cue.end - m.refs[0].end) <= 5
+                    && Math.abs((m.cue.end - m.cue.start) - (m.refs[0].end - m.refs[0].start)) <= 2)
+            // A lone sign cannot establish alignment; require matches across the episode.
+            const distinct: Record<string, boolean> = {}
+            for (const m of matches) distinct[normalize(m.cue.text)] = true
+            if (Object.keys(distinct).length < 3 || Math.max(...matches.map(m => m.cue.start)) - Math.min(...matches.map(m => m.cue.start)) < 60) return { content, matched: 0, adjusted: 0 }
+            const replacements: Record<number, TimingCue> = {}
+            for (const m of matches) if (Math.abs(m.cue.start - m.refs[0].start) > 0.1 || Math.abs(m.cue.end - m.refs[0].end) > 0.1) replacements[m.cue.line] = m.refs[0]
+            const adjusted = Object.keys(replacements).length
+            if (!adjusted) return { content, matched: matches.length, adjusted: 0 }
+            const stamp = (s: number, ass: boolean) => {
+                const units = ass ? 100 : 1000, ticks = Math.round(s * units)
+                const sec = Math.floor(ticks / units), h = Math.floor(sec / 3600), m = Math.floor(sec / 60) % 60
+                return (ass ? String(h) : ("0" + h).slice(-2)) + ":" + ("0" + m).slice(-2) + ":" + ("0" + sec % 60).slice(-2) + "." + (String(ticks % units).padStart(ass ? 2 : 3, "0"))
+            }
+            if (parseVtt(content).length) {
+                const parsed = parseVtt(content)
+                let cueIndex = 0
+                const blocks = content.replace(/^\uFEFF/, "").replace(/\r\n?/g, "\n").split(/\n\s*\n/).map(block => {
+                    if (!parsed.some(c => c.block === block)) return block
+                    const ref = replacements[cueIndex++]
+                    return ref ? block.replace(/((?:\d{2,}:)?\d{2}:\d{2}\.\d{3})\s+-->\s+((?:\d{2,}:)?\d{2}:\d{2}\.\d{3})/, stamp(ref.start, false) + " --> " + stamp(ref.end, false)) : block
+                })
+                return { content: blocks.join("\n\n"), matched: matches.length, adjusted }
+            }
+            const lines = content.replace(/^\uFEFF/, "").split(/\r?\n/)
+            for (const cue of cues) {
+                const ref = replacements[cue.line]
+                if (!ref || !cue.fields) continue
+                const fields = cue.fields.slice()
+                fields[cue.startIndex!] = stamp(ref.start, true); fields[cue.endIndex!] = stamp(ref.end, true)
+                lines[cue.line] = "Dialogue:" + fields.join(",")
+            }
+            return { content: lines.join("\r\n"), matched: matches.length, adjusted }
+        }
+
         function cueStats(cues: VttCue[]): { count: number, seconds: number, span: number } {
             const sorted = cues.slice().sort((a, b) => a.start - b.start)
             let seconds = 0, end = 0
@@ -91,7 +160,7 @@ buffer/index.js:
         const API_KEY = "{{apiKey}}"
         const PREFER_FORCED = String("{{preferForced}}") !== "false"
         const API = "https://api.opensubtitles.com/api/v1"
-        const UA = "SeaSubs v0.8.0"
+        const UA = "SeaSubs v0.9.0"
 
         let title = ""
         let episode = 0
@@ -218,6 +287,68 @@ buffer/index.js:
             playback?: string
             sourceMode?: string
             automatic?: boolean
+            timingMatched?: number
+            timingKey?: string
+            fetchHeaders?: Record<string, string>
+            fetchTimeout?: number
+        }
+
+        let timingReferenceKey = "", timingReference: Promise<string> | undefined
+        function unwrapProviderUrl(url: string): { url: string, headers: Record<string, string> } {
+            const headers: Record<string, string> = {}
+            if (!/^https?:\/\/(?:127\.0\.0\.1|localhost)(?::\d+)?\/api\/v1\/proxy\?/i.test(url)) return { url, headers }
+            const params: Record<string, string> = {}
+            for (const part of url.slice(url.indexOf("?") + 1).split("&")) {
+                const at = part.indexOf("=")
+                if (at < 0) continue
+                try { params[part.slice(0, at)] = decodeURIComponent(part.slice(at + 1).replace(/\+/g, " ")) } catch (_) { }
+            }
+            // Fetch the public subtitle target under the existing domain permissions.
+            if (!/^https:\/\//i.test(params.url || "")) return { url, headers }
+            try {
+                const supplied = JSON.parse(params.headers || "{}")
+                for (const name of Object.keys(supplied)) if (/^(origin|referer|user-agent)$/i.test(name) && typeof supplied[name] === "string") headers[name] = supplied[name]
+            } catch (_) { }
+            return { url: params.url, headers }
+        }
+
+        async function providerTimingReference(): Promise<string> {
+            const tracks = ctx.videoCore.getCurrentPlaybackInfo()?.subtitleTracks || []
+            const english = tracks.filter(t => !/^SeaSubs/.test(String(t.label || ""))
+                && (/^(en|eng|english)(?:[-_]|$)/i.test(String(t.language || "")) || /english|\beng\b/i.test(String(t.label || ""))))
+            const key = playbackKey() + "|" + english.map(t => String((t as any).uri || (t as any).src || (t as any).sourceUrl || (t as any).content || "")).join("|")
+            if (key === timingReferenceKey && timingReference) return await timingReference
+            timingReferenceKey = key
+            timingReference = (async () => {
+                for (const track of english.slice(0, 2)) {
+                    const raw = track as any
+                    const target = unwrapProviderUrl(String(raw.uri || raw.src || raw.sourceUrl || ""))
+                    const content = await readCandidate({ label: "Provider timing reference", url: target.url,
+                        fetchHeaders: target.headers, fetchTimeout: 5, content: raw.content == null ? "" : String(raw.content), type: String(raw.format || raw.type || "vtt"), language: "en", score: 0, mode: "direct" })
+                    if (timingCues(content).length >= 3) return content
+                }
+                return ""
+            })()
+            return await timingReference
+        }
+
+        async function prepareTiming(item: AnimeToshoResult): Promise<AnimeToshoResult> {
+            if (!item.content || item.mode === "derive") return item
+            const key = playbackKey()
+            if (item.timingKey === key) return item
+            const reference = await providerTimingReference()
+            if (key !== playbackKey()) return item
+            const result = reference ? compareTiming(item.content, reference) : { content: item.content, matched: 0, adjusted: 0 }
+            console.log("SeaSubs timing comparison", { source: item.label, matched: result.matched, adjusted: result.adjusted, referenceAvailable: !!reference })
+            return { ...item, content: result.content, timingKey: key, timingMatched: result.matched,
+                label: item.label.replace(/ — timing (?:matches provider|adjusted to provider|unverified)$/, "")
+                    + (result.matched ? result.adjusted ? " — timing adjusted to provider" : " — timing matches provider" : " — timing unverified") }
+        }
+
+        async function rankTiming(items: AnimeToshoResult[]): Promise<AnimeToshoResult[]> {
+            const out: AnimeToshoResult[] = []
+            for (const item of items) out.push(await prepareTiming(item))
+            return out.sort((a, b) => (b.timingMatched || 0) - (a.timingMatched || 0) || b.score - a.score)
         }
 
         function animeToshoScore(name: string, release: string): number {
@@ -404,8 +535,8 @@ buffer/index.js:
                 return ""
             }
             try {
-                const r = await ctx.fetch(item.url, { timeout: 15,
-                    headers: { "Referer": "https://vidnest.fun/", "User-Agent": "Mozilla/5.0" } })
+                const r = await ctx.fetch(item.url, { timeout: item.fetchTimeout || 15,
+                    headers: { "Referer": "https://vidnest.fun/", "User-Agent": "Mozilla/5.0", ...item.fetchHeaders } })
                 if (!r.ok) throw new Error("HTTP " + r.status)
                 const text = /\.xz(?:[?#]|$)/i.test(item.url) ? SeaSubsXZ.decode((r as any).body) : r.text()
                 const isSrt = item.type === "srt" && /^\d{2}:\d{2}:\d{2},\d{3}\s+-->\s+\d{2}:\d{2}:\d{2},\d{3}/m.test(text)
@@ -455,13 +586,14 @@ buffer/index.js:
                 // primitives. Modern playback uses uri/sourceUrl/format fields.
                 const raw = t as any
                 const value = (v: any) => v == null ? "" : String(v)
-                const url = value(raw.src) || value(raw.uri) || value(raw.sourceUrl)
+                const target = unwrapProviderUrl(value(raw.src) || value(raw.uri) || value(raw.sourceUrl))
+                const url = target.url
                 const content = value(raw.content)
                 if (!url && !content) {
                     console.log("SeaSubs current track skipped", { label: value(raw.label), reason: "No URL/content exposed" })
                     continue
                 }
-                items.push({ url, content, type: value(raw.type) || value(raw.format) || "vtt", language: "en", mode: "direct",
+                items.push({ url, content, fetchHeaders: target.headers, type: value(raw.type) || value(raw.format) || "vtt", language: "en", mode: "direct",
                     label: "Current provider — " + (t.label || "English"), sourceMode: dubbed ? "dub" : "sub",
                     score: /forced|signs?|songs?/i.test(t.label || "") ? 3000 : 0 })
             }
@@ -473,19 +605,25 @@ buffer/index.js:
             if (item.playback !== playbackKey()) { ctx.toast.warning("SeaSubs: episode changed; search again."); return }
             if (item.automatic && !followPreference().enabled) return
             if (item.mode === "derive") { await deriveAndInject(item); return }
-            if (/\.xz(?:[?#]|$)/i.test(item.url) && !item.content) {
+            if (!item.content) {
                 item.content = await readCandidate(item)
                 syncFromVideoCore()
                 if (item.playback !== playbackKey()) return
                 if (item.automatic && !followPreference().enabled) return
-                if (!item.content) { ctx.toast.error("SeaSubs: compressed subtitle could not be read; see log."); return }
+                if (!item.content && /\.xz(?:[?#]|$)/i.test(item.url)) { ctx.toast.error("SeaSubs: compressed subtitle could not be read; see log."); return }
             }
             if (item.content) {
+                item = await prepareTiming(item)
+                syncFromVideoCore()
+                if (item.playback !== playbackKey() || (item.automatic && !followPreference().enabled)) return
                 ctx.videoCore.addExternalSubtitleTrack({ content: item.content, label: "SeaSubs — " + item.label,
                     language: item.language, type: item.type as "vtt" | "ass" | "ssa" | "srt", default: true })
                 ctx.toast.success("SeaSubs: subtitle track added.")
                 palette.close()
-            } else injectExternal(item.url, item.label, item.language, item.type)
+            } else {
+                item = { ...item, label: item.label + " — timing unverified" }
+                injectExternal(item.url, item.label, item.language, item.type)
+            }
             rememberChoice(item)
         }
 
@@ -629,18 +767,8 @@ buffer/index.js:
                 ctx.toast.warning("SeaSubs: this full subtitle had no recognizable Signs / Songs events.")
                 return
             }
-            ctx.videoCore.addExternalSubtitleTrack({
-                content: derived.content,
-                label: "SeaSubs — Generated Signs & Songs (" + derived.count + " events)",
-                language: "en",
-                type: item.type === "ssa" ? "ssa" : "ass",
-                default: true,
-            })
-            ctx.videoCore.showMessage("SeaSubs generated Signs & Songs", 2500)
-            ctx.toast.success("SeaSubs: generated " + derived.count + " Signs / Songs events.")
-            palette.close()
-            rememberChoice({ ...item, mode: "direct", content: derived.content, score: 2000,
-                label: "Generated Signs & Songs — " + item.label })
+            await loadCandidate({ ...item, playback: item.playback || playbackKey(), mode: "direct", content: derived.content, score: 2000,
+                label: item.label.replace(/^Generate Signs & Songs/, "Generated Signs & Songs") + " (" + derived.count + " events)" })
         }
 
         async function animeyaRpc(method: string, input: any): Promise<any> {
@@ -793,6 +921,7 @@ buffer/index.js:
 
         async function search(automatic = false, wider = false): Promise<void> {
             if (searching) return
+            if (wider) timingReference = undefined
             searching = true
             unreadable = 0
             try { await runSearch(automatic, wider) }
@@ -824,7 +953,7 @@ buffer/index.js:
             syncFromVideoCore()
             if (key !== playbackKey()) return
             if (animeTosho.some(i => i.content && i.mode === "direct")) {
-                showCandidates(animeTosho, key, automatic)
+                showCandidates(await rankTiming(animeTosho), key, automatic)
                 return
             }
             const sources = await Promise.all([currentCandidates(), searchAnimeyaForced()])
@@ -832,7 +961,7 @@ buffer/index.js:
             if (key !== playbackKey()) return
             const candidates = sources[0].concat(sources[1]).sort((a, b) => b.score - a.score)
             if (candidates.some(i => i.score >= 2000)) {
-                showCandidates(candidates, key, automatic)
+                showCandidates(await rankTiming(candidates), key, automatic)
                 return
             }
             if (animeTosho.length) {
@@ -849,7 +978,7 @@ buffer/index.js:
                     ctx.toast.warning("SeaSubs: matching subtitles were found but could not be read; see log.")
                     return
                 }
-                showCandidates(choices.concat(candidates), key, automatic)
+                showCandidates(await rankTiming(choices.concat(candidates)), key, automatic)
                 return
             }
             if (candidates.length) {

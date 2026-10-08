@@ -2,6 +2,14 @@
 
 Seanime plugin for external English Forced / Signs & Songs subtitles. Adds only subtitle tracks through VideoCore; preserves your current video provider, quality and audio.
 
+## v0.9.0 provider timing comparison
+
+- Compares readable ASS/SSA and VTT candidate cues with the current provider's original English captions. Prioritizes compared matches among available results and labels timing as matching, adjusted, or unverified.
+- Adjusts only individual matching cues, preserving other timestamps, ASS styles/positioning and VTT cue settings. Requires at least three distinct text matches spanning sixty seconds; ignores repeated/short text, drawing commands, differences over five seconds and large duration differences. Does not apply a guessed global delay or extrapolate across different cuts.
+- Resolves Seanime's local subtitle proxy URLs to the public target, retaining only Origin, Referer and User-Agent headers under existing network permissions. Provider comparison downloads have a five-second timeout and are cached for the playback session. **Search other subtitle sources** retries the reference.
+- Checks selected/generated tracks before injection and discards results if the episode changes. Failed downloads or insufficient matches keep original timing. Provider captions can themselves be mistimed: matching them is not proof of visual synchronization, and SRT-only sources remain unverified.
+- Timing checks are covered by mixed early/correct cues, ASS/VTT preservation, ambiguous evidence, proxy headers, blocked references and playback-change regression tests.
+
 ## v0.8.0 episode matching and reusable results
 
 - Filters season-batch subtitle attachments by the requested episode, including decimal special episodes. The Tsukigakirei Episode 1 replay checks the poster sign at 5:47 against the actual Episode 1 ASS.

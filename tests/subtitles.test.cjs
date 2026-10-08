@@ -24,7 +24,7 @@ function harness(fetch, storage = new Map()) {
     vm.createContext(rootSandbox);
     let code = fs.readFileSync(path.join(root,'code.ts'),'utf8');
     code = code.replace('ctx.registerEventHandler("seasubs-search",',
-        'globalThis.testHooks = {collectSubtitleAttachments, SeaSubsXZ, parseVtt, inferDubCompanion, deriveVtt, currentCandidates, runSearch, search, scheduleAuto, searchAnimeToshoHost, deriveSignsSongsAss, inspectCandidates, syncFromVideoCore, showCandidates, playbackKey}; ctx.registerEventHandler("seasubs-search",');
+        'globalThis.testHooks = {compareTiming, timingCues, unwrapProviderUrl, prepareTiming, rankTiming, loadCandidate, collectSubtitleAttachments, SeaSubsXZ, parseVtt, inferDubCompanion, deriveVtt, currentCandidates, runSearch, search, scheduleAuto, searchAnimeToshoHost, deriveSignsSongsAss, inspectCandidates, syncFromVideoCore, showCandidates, playbackKey}; ctx.registerEventHandler("seasubs-search",');
     vm.runInContext(ts.transpileModule(code, {compilerOptions:{target:ts.ScriptTarget.ES2018}}).outputText, rootSandbox);
     rootSandbox.init();
     // Seanime serializes the callback and evaluates it in a separate UI VM.
@@ -92,6 +92,65 @@ test('Episode 1 generated signs take three requests and bypass slow fallback sou
 });
 const stamp = n => new Date(n * 1000).toISOString().slice(11,23);
 const vtt = cues => 'WEBVTT\n\n' + cues.map((c,i) => `${i}\n${stamp(c.start)} --> ${stamp(c.end)}\n${c.text}`).join('\n\n');
+const timingSample = () => [
+    {start:10,end:12,text:'School entrance sign'}, {start:50,end:52,text:'Student council office'},
+    {start:110,end:112,text:'Library opens tomorrow'}, {start:160,end:162,text:'Keep the hallway quiet'},
+    {start:210,end:212,text:'Unmatched source translation'}];
+const timingAss = cues => '[Script Info]\nScriptType: v4.00+\n[V4+ Styles]\nStyle: Signs,Arial,20\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n' + cues.map(c => `Dialogue: 0,${stamp(c.start).replace(/^00:/,'0:').slice(0,-1)},${stamp(c.end).replace(/^00:/,'0:').slice(0,-1)},Signs,,0,0,0,,{\\pos(100,200)}${c.text}`).join('\n');
+test('timing comparison fixes only matching early cues and preserves correct and unmatched ASS cues', () => {
+    const h = harness(), cues = timingSample();
+    const reference = cues.slice(0,4).map((c,i) => ({...c,start:c.start+(i===0||i===2?1:0),end:c.end+(i===0||i===2?1:0)}));
+    const result = h.hooks.compareTiming(timingAss(cues),vtt(reference));
+    assert.equal(result.matched,4); assert.equal(result.adjusted,2);
+    const parsed = h.hooks.timingCues(result.content);
+    assert.deepEqual(Array.from(parsed,c=>c.start),[11,50,111,160,210]);
+    assert.deepEqual(Array.from(parsed,c=>c.end),[13,52,113,162,212]);
+    assert.equal((result.content.match(/\\pos\(100,200\)/g)||[]).length,5);
+    assert.match(result.content,/Style: Signs,Arial,20/);
+});
+test('VTT retiming preserves settings, identifiers, styles and unmatched cues', () => {
+    const h=harness(), cues=timingSample();
+    const content=vtt(cues).replace('WEBVTT','WEBVTT\n\nSTYLE\n::cue { color: cyan; }').replace('00:00:12.000','00:00:12.000 align:start');
+    const reference=vtt(cues.slice(0,4).map((c,i)=>({...c,start:c.start+(i===0?1:0),end:c.end+(i===0?1:0)})));
+    const result=h.hooks.compareTiming(content,reference);
+    assert.equal(result.adjusted,1); assert.match(result.content,/0\n00:00:11.000 --> 00:00:13.000 align:start/);
+    assert.match(result.content,/STYLE\n::cue \{ color: cyan; \}/);
+    assert.match(result.content,/00:03:30.000 --> 00:03:32.000/);
+});
+test('timing comparison rejects sparse, repeated, distant and short-span evidence', () => {
+    const h=harness(), cues=timingSample(), content=timingAss(cues);
+    for(const refs of [cues.slice(0,2),cues.slice(0,4).flatMap(c=>[c,{...c,start:c.start+1,end:c.end+1}]),
+        cues.slice(0,4).map(c=>({...c,start:c.start+20,end:c.end+20}))]) {
+        const result=h.hooks.compareTiming(content,vtt(refs)); assert.equal(result.content,content); assert.equal(result.adjusted,0);
+    }
+    const short=cues.slice(0,3).map((c,i)=>({...c,start:i*5,end:i*5+2}));
+    assert.equal(h.hooks.compareTiming(timingAss(short),vtt(short.map(c=>({...c,start:c.start+1,end:c.end+1})))).adjusted,0);
+});
+test('provider comparison unwraps public proxy target, keeps CDN headers, and prioritizes matching tracks', async () => {
+    const calls=[], refs=vtt(timingSample().slice(0,4));
+    const url='http://127.0.0.1:43211/api/v1/proxy?url='+encodeURIComponent('https://6a8y6.broforgotsave.online/eng.vtt')+'&headers='+encodeURIComponent(JSON.stringify({Origin:'https://megaplay.buzz',Referer:'https://megaplay.buzz/',Authorization:'private'}));
+    const h=harness(async (u,opts)=>{calls.push({u,opts});return response(refs)});
+    h.setTracks([{label:'English',language:'en',uri:{toString:()=>url},format:'vtt'}]);
+    const matched={label:'English Signs',url:'',content:timingAss(timingSample()),type:'ass',language:'en',score:1000,mode:'direct'};
+    const ranked=await h.hooks.rankTiming([{...matched,label:'Different translation',content:timingAss(timingSample().map(c=>({...c,text:'OTHER '+c.text})))},matched]);
+    assert.match(ranked[0].label,/timing matches provider/); assert.match(ranked[1].label,/timing unverified/);
+    assert.equal(calls.length,1); assert.equal(calls[0].u,'https://6a8y6.broforgotsave.online/eng.vtt');
+    assert.equal(calls[0].opts.headers.Origin,'https://megaplay.buzz'); assert.equal(calls[0].opts.headers.Referer,'https://megaplay.buzz/');
+    assert.equal(calls[0].opts.headers.Authorization,undefined); assert.equal(calls[0].opts.timeout,5);
+});
+test('blocked reference leaves content unchanged and labels timing unverified', async () => {
+    const h=harness(async()=>({ok:false,status:403})), content=timingAss(timingSample());
+    h.setTracks([{label:'English',language:'en',uri:'https://cdn.test/eng.vtt'}]);
+    const result=await h.hooks.prepareTiming({label:'Signs',content,url:'',type:'ass',language:'en',score:1000,mode:'direct'});
+    assert.equal(result.content,content); assert.equal(result.timingMatched,0); assert.match(result.label,/timing unverified/);
+});
+test('episode changes during timing fetch prevent stale subtitle injection', async () => {
+    let release;const h=harness(()=>new Promise(resolve=>{release=resolve}));
+    h.setTracks([{label:'English',language:'en',uri:'https://cdn.test/eng.vtt'}]);
+    const pending=h.hooks.loadCandidate({label:'Signs',content:timingAss(timingSample()),url:'',type:'ass',language:'en',score:1000,mode:'direct',playback:h.hooks.playbackKey()});
+    h.change(5);release(response(vtt(timingSample().slice(0,4))));await pending;
+    assert.equal(h.injected.length,0);
+});
 test('decoder runs without Node/browser globals and verifies checksums', () => {
     const {sandbox,hooks} = harness();
     const bytes = Uint8Array.from(Buffer.from(encoded,'base64'));
