@@ -2,6 +2,13 @@
 
 Seanime plugin for external English Forced / Signs & Songs subtitles. Adds only subtitle tracks through VideoCore; preserves your current video provider, quality and audio.
 
+## v0.10.1 download reuse and failed-track handling
+
+- Shares simultaneous subtitle reads and reuses successful downloads for five minutes, bounded to twelve cached files / eight million characters. Briefly caches failures for fifteen seconds; wider search retries failed reads. Selection no longer repeats downloads already completed during inspection.
+- Uses eight-second subtitle/API and six-second Vidnest fallback timeouts, rather than long repeated waits.
+- Excludes unreadable provider results and refuses to inject a failed download URL into the player. Leaves the active track in place and reports the failure instead of claiming success.
+- Strips the byte-order mark and detects actual ASS/VTT content before injection. Genuine ASS labeled SSA bypasses Seanime's conversion service. Logs the selected source, detected format and payload size to help diagnose renderer failures; this does not claim to resolve an unidentified Seanime renderer error.
+
 ## v0.10.0 manual timing and loading feedback
 
 - The tray accepts an exact anime delay in seconds (`1.250`, `-0.250`) or milliseconds (`250ms`), with Apply, Later +100ms, Earlier −100ms and Reset buttons. Positive values show subtitles later. Saves the delay per anime and sub/dub mode, applies it to following episodes and restores it after reload. Limit: ±120 seconds.

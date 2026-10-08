@@ -160,7 +160,7 @@ buffer/index.js:
         const API_KEY = "{{apiKey}}"
         const PREFER_FORCED = String("{{preferForced}}") !== "false"
         const API = "https://api.opensubtitles.com/api/v1"
-        const UA = "SeaSubs v0.10.0"
+        const UA = "SeaSubs v0.10.1"
 
         let title = ""
         let episode = 0
@@ -228,9 +228,15 @@ buffer/index.js:
         }
         function emitSubtitle(item: AnimeToshoResult): void {
             const delay = animeDelay()
-            ctx.videoCore.addExternalSubtitleTrack({ content: offsetTrack(item.content!,delay),
+            const content = offsetTrack(item.content!,delay).replace(/^\uFEFF/,"")
+            // Metadata sometimes says SSA/VTT for an actual ASS file. Sending the
+            // real format avoids routing ASS through Seanime's conversion service.
+            const type = /^WEBVTT(?:\s|$)/.test(content) ? "vtt"
+                : /^\[V4\+ Styles\]\s*$/mi.test(content) && /^\[Events\]\s*$/mi.test(content) ? "ass" : item.type
+            console.log("SeaSubs subtitle injection", { source:item.label,declaredType:item.type,type,characters:content.length,delayMs:delay })
+            ctx.videoCore.addExternalSubtitleTrack({ content,
                 label: "SeaSubs — " + item.label + (delay ? " (delay " + (delay > 0 ? "+" : "") + (delay/1000).toFixed(3) + "s)" : ""),
-                language: item.language, type: item.type as "vtt" | "ass" | "ssa" | "srt", default: true })
+                language: item.language, type: type as "vtt" | "ass" | "ssa" | "srt", default: true })
         }
         function applyAnimeDelay(milliseconds: number): void {
             syncFromVideoCore()
@@ -245,6 +251,7 @@ buffer/index.js:
         const resultLists: Record<string, AnimeToshoResult[]> = {}
         const cacheOrder: string[] = []
         const feedCache: Record<string, { time: number, rows: any[] }> = {}
+        const subtitleReads: Record<string, { time: number, size: number, promise: Promise<string> }> = Object.create(null)
         const seriesKey = () => String(mediaId) + "|" + String(dubbed)
         const episodeKey = () => seriesKey() + "|" + episode
         type FollowPreference = { enabled: boolean, releaseHint: string }
@@ -603,8 +610,28 @@ buffer/index.js:
                 console.log("SeaSubs subtitle skipped", { source: item.label, reason: "No readable subtitle URL/content" })
                 return ""
             }
+            const cacheKey = item.url + "|" + item.type + "|" + JSON.stringify(item.fetchHeaders || {})
+            const existing = subtitleReads[cacheKey]
+            if (existing && Date.now() - existing.time < (existing.size ? 300000 : 15000)) return await existing.promise
+            const entry = { time: Date.now(), size: 0, promise: Promise.resolve("") }
+            subtitleReads[cacheKey] = entry
+            entry.promise = fetchCandidate(item).then(content => {
+                entry.time = Date.now()
+                entry.size = content.length
+                const keys = Object.keys(subtitleReads)
+                let size = keys.reduce((n,key) => n + subtitleReads[key].size,0)
+                while (keys.length > 12 || size > 8000000) {
+                    const oldest = keys.shift()!
+                    size -= subtitleReads[oldest].size
+                    delete subtitleReads[oldest]
+                }
+                return content
+            })
+            return await entry.promise
+        }
+        async function fetchCandidate(item: AnimeToshoResult): Promise<string> {
             try {
-                const r = await ctx.fetch(item.url, { timeout: item.fetchTimeout || 15,
+                const r = await ctx.fetch(item.url, { timeout: item.fetchTimeout || 8,
                     headers: { "Referer": "https://vidnest.fun/", "User-Agent": "Mozilla/5.0", ...item.fetchHeaders } })
                 if (!r.ok) throw new Error("HTTP " + r.status)
                 const text = /\.xz(?:[?#]|$)/i.test(item.url) ? SeaSubsXZ.decode((r as any).body) : r.text()
@@ -623,6 +650,7 @@ buffer/index.js:
             const references = inspected.filter(i => i.sourceMode === "sub" && parseVtt(i.content || "").length >= 100)
             const out: AnimeToshoResult[] = []
             for (const item of inspected) {
+                if (!item.content) continue
                 const cues = parseVtt(item.content || "")
                 if (cues.length) console.log("SeaSubs subtitle content", { source: item.label, ...cueStats(cues) })
                 if (item.score >= 3000) { out.push(item); continue }
@@ -685,7 +713,7 @@ buffer/index.js:
                 syncFromVideoCore()
                 if (item.playback !== playbackKey()) return
                 if (item.automatic && !followPreference().enabled) return
-                if (!item.content && /\.xz(?:[?#]|$)/i.test(item.url)) { ctx.toast.error("SeaSubs: compressed subtitle could not be read; see log."); return }
+                if (!item.content) { ctx.toast.error("SeaSubs: this subtitle could not be downloaded or read. Choose another source; details are in the log."); return }
             }
             if (item.content) {
                 item = await prepareTiming(item)
@@ -695,9 +723,6 @@ buffer/index.js:
                 activeSubtitle = { ...item }
                 ctx.toast.success("SeaSubs: subtitle track added.")
                 palette.close()
-            } else {
-                item = { ...item, label: item.label + " — timing unverified" }
-                injectExternal(item.url, item.label, item.language, item.type)
             }
             rememberChoice(item)
         }
@@ -917,7 +942,7 @@ buffer/index.js:
             const url = "https://animeya.cc/api/trpc/" + method + "?input=" + encodeURIComponent(JSON.stringify({ json: input }))
             const r = await ctx.fetch(url, {
                 headers: { "Referer": "https://animeya.cc/", "User-Agent": "Mozilla/5.0" },
-                timeout: 20,
+                timeout: 8,
             })
             if (!r.ok) {
                 let detail = ""
@@ -1016,7 +1041,7 @@ buffer/index.js:
                             const api = "https://new.vidnest.fun/" + route + match[2] + "/" + match[3] + "/" + match[4] + suffix
                             const rr = await ctx.fetch(api, {
                                 headers: { "Referer": String(player.url), "User-Agent": "Mozilla/5.0" },
-                                timeout: 20,
+                                timeout: 6,
                             })
                             if (!rr.ok) continue
                             const data = animeyaDecodeCipher(rr.json() as any)
@@ -1064,6 +1089,7 @@ buffer/index.js:
         async function search(automatic = false, wider = false): Promise<void> {
             if (searching) return
             if (wider) timingReference = undefined
+            if (wider) for (const key of Object.keys(subtitleReads)) if (!subtitleReads[key].size) delete subtitleReads[key]
             searching = true
             tray.update()
             unreadable = 0

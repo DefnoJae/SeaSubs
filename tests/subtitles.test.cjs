@@ -27,7 +27,7 @@ function harness(fetch, storage = new Map()) {
     vm.createContext(rootSandbox);
     let code = fs.readFileSync(path.join(root,'code.ts'),'utf8');
     code = code.replace('ctx.registerEventHandler("seasubs-search",',
-        'globalThis.testHooks = {shiftSign,offsetTrack,parseDelay,animeDelay,applyAnimeDelay,openSignTiming,compareTiming, timingCues, unwrapProviderUrl, prepareTiming, rankTiming, loadCandidate, collectSubtitleAttachments, SeaSubsXZ, parseVtt, inferDubCompanion, deriveVtt, currentCandidates, runSearch, search, scheduleAuto, searchAnimeToshoHost, deriveSignsSongsAss, inspectCandidates, syncFromVideoCore, showCandidates, playbackKey}; ctx.registerEventHandler("seasubs-search",');
+        'globalThis.testHooks = {readCandidate,shiftSign,offsetTrack,parseDelay,animeDelay,applyAnimeDelay,openSignTiming,compareTiming, timingCues, unwrapProviderUrl, prepareTiming, rankTiming, loadCandidate, collectSubtitleAttachments, SeaSubsXZ, parseVtt, inferDubCompanion, deriveVtt, currentCandidates, runSearch, search, scheduleAuto, searchAnimeToshoHost, deriveSignsSongsAss, inspectCandidates, syncFromVideoCore, showCandidates, playbackKey}; ctx.registerEventHandler("seasubs-search",');
     vm.runInContext(ts.transpileModule(code, {compilerOptions:{target:ts.ScriptTarget.ES2018}}).outputText, rootSandbox);
     rootSandbox.init();
     // Seanime serializes the callback and evaluates it in a separate UI VM.
@@ -154,6 +154,25 @@ test('track download spinner clears when compressed subtitle download fails', as
     finish({ok:false,status:403});await pending;
     assert.equal(h.renderTray().find(i=>i.onClick==='seasubs-search').loading,false);assert.equal(h.injected.length,0);
 });
+test('simultaneous inspections and later selection share one subtitle download', async () => {
+    let finish,calls=0;const h=harness(()=>{calls++;return new Promise(resolve=>{finish=resolve})});
+    const item={label:'Signs',url:'https://cdn.test/signs.ass',type:'ass',language:'en',score:1000,mode:'direct'};
+    const first=h.hooks.readCandidate(item),second=h.hooks.readCandidate({...item});
+    assert.equal(calls,1);finish(response(timingAss(timingSample())));
+    assert.equal(await first,await second);
+    await h.hooks.loadCandidate({...item,playback:h.hooks.playbackKey()});assert.equal(calls,1);assert.equal(h.injected.length,1);
+});
+test('failed downloads are briefly reused but never injected as player URLs', async () => {
+    let calls=0;const h=harness(async()=>{calls++;return {ok:false,status:403}});
+    const item={label:'Signs',url:'https://cdn.test/blocked.vtt',type:'vtt',language:'en',score:1000,mode:'direct',playback:h.hooks.playbackKey()};
+    await h.hooks.loadCandidate(item);await h.hooks.loadCandidate({...item});assert.equal(calls,1);
+    assert.equal(h.injected.length,0);assert.ok(h.messages.some(m=>/could not be downloaded/.test(m)));
+});
+test('actual ASS content overrides wrong SSA metadata and drops BOM before injection', async () => {
+    const h=harness(),content='\uFEFF'+timingAss(timingSample());
+    await h.hooks.loadCandidate({label:'Signs',url:'',content,type:'ssa',language:'en',score:1000,mode:'direct',playback:h.hooks.playbackKey()});
+    assert.equal(h.injected[0].type,'ass');assert.ok(!h.injected[0].content.startsWith('\uFEFF'));
+});
 test('timing comparison fixes only matching early cues and preserves correct and unmatched ASS cues', () => {
     const h = harness(), cues = timingSample();
     const reference = cues.slice(0,4).map((c,i) => ({...c,start:c.start+(i===0||i===2?1:0),end:c.end+(i===0||i===2?1:0)}));
@@ -265,10 +284,10 @@ test('compressed selection injects plaintext only, and stale selections are reje
     h.change(); h.palette.items[0].onSelect();
     await new Promise(r => setImmediate(r)); assert.equal(h.injected.length,1);
 });
-test('failed English fetch is a preview, never a verified forced track', async () => {
+test('failed English fetch is excluded instead of offered as a broken player track', async () => {
     const h = harness(async () => ({ok:false,status:403}));
     const results = await h.hooks.inspectCandidates([{label:'Animeya dub — English',url:'https://cdn/test.vtt',type:'vtt',sourceMode:'dub',score:0}]);
-    assert.equal(results.length,1); assert.match(results[0].label,/unverified/); assert.ok(results[0].score < 2000);
+    assert.equal(results.length,0);
 });
 
 test('current URI wrappers become primitive URLs; empty tracks are skipped', async () => {
@@ -370,7 +389,7 @@ test('live captured episode responses survive blocked VTT and inject the real 20
     await new Promise(r => setImmediate(r));
     assert.equal(h.injected.length,1); assert.equal(h.injected[0].type,'ass');
     assert.equal((h.injected[0].content.match(/^Dialogue:/gm)||[]).length,20);
-    assert.equal(h.injected[0].content,fs.readFileSync(path.join(dir,'signs-raw.ass'),'utf8'));
+    assert.equal(h.injected[0].content,fs.readFileSync(path.join(dir,'signs-raw.ass'),'utf8').replace(/^\uFEFF/,''));
     const full = fs.readFileSync(path.join(dir,'full-raw.ass'),'utf8');
     const derived = h.hooks.deriveSignsSongsAss(full);
     assert.ok(derived.count > 0 && derived.count < 313);
