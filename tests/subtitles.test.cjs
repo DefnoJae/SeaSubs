@@ -28,14 +28,14 @@ function harness(fetch, storage = new Map()) {
             getPlaybackStatus:()=>({currentTime:position}),getPlaybackState: () => ({playbackInfo:playback}), addExternalSubtitleTrack: t => injected.push(t), showMessage() {}, addEventListener:(name,fn) => listeners.set(name,fn) },
         playback:{ registerEventListener() {} }, dom:{ onReady(fn) {domReady=fn},observe:(selector,fn)=>observers.set(selector,fn) }, screen:{ onNavigate() {}, loadCurrent() {} },
         anime:{ getAnimeMetadata: async () => ({episodes:{4:{anidbId:271605},5:{anidbId:271606},6:{anidbId:271607}}}) },
-        setTimeout:(fn) => {const id = ++nextTimer; timers.set(id,fn); return () => timers.delete(id)},
+        setTimeout:(fn,ms) => {const id = ++nextTimer; timers.set(id,{fn,ms}); return () => timers.delete(id)},
         registerEventHandler:(name,fn) => handlers.set(name,fn) };
     let callback;
     const rootSandbox = { $ui:{register: cb => {callback = cb.toString()} } };
     vm.createContext(rootSandbox);
     let code = fs.readFileSync(path.join(root,'code.ts'),'utf8');
     code = code.replace('ctx.registerEventHandler("seasubs-search",',
-        'globalThis.testHooks = {matchesRelease,inspectSignsRole,presentSearchResults,readCandidate,shiftSign,offsetTrack,parseDelay,animeDelay,applyAnimeDelay,openSignTiming,compareTiming, timingCues, unwrapProviderUrl, prepareTiming, rankTiming, loadCandidate, collectSubtitleAttachments, SeaSubsXZ, parseVtt, inferDubCompanion, deriveVtt, currentCandidates, runSearch, search, scheduleAuto, searchAnimeToshoHost, deriveSignsSongsAss, inspectCandidates, syncFromVideoCore, showCandidates, playbackKey}; ctx.registerEventHandler("seasubs-search",');
+        'globalThis.testHooks = {searchAnimeTosho,searchNyaa,parseNyaaRss,sourceFetch,torrentSubtitles,inspectTorrentChoices,matchesRelease,inspectSignsRole,presentSearchResults,readCandidate,shiftSign,offsetTrack,parseDelay,animeDelay,applyAnimeDelay,openSignTiming,compareTiming, timingCues, unwrapProviderUrl, prepareTiming, rankTiming, loadCandidate, collectSubtitleAttachments, SeaSubsXZ, parseVtt, inferDubCompanion, deriveVtt, currentCandidates, runSearch, search, scheduleAuto, searchAnimeToshoHost, deriveSignsSongsAss, inspectCandidates, syncFromVideoCore, showCandidates, playbackKey}; ctx.registerEventHandler("seasubs-search",');
     vm.runInContext(ts.transpileModule(code, {compilerOptions:{target:ts.ScriptTarget.ES2018}}).outputText, rootSandbox);
     rootSandbox.init();
     // Seanime serializes the callback and evaluates it in a separate UI VM.
@@ -50,7 +50,7 @@ function harness(fetch, storage = new Map()) {
         setTracks:tracks => {playback.subtitleTracks = tracks},
         change:(ep=4,mediaId=154692,dub=true) => {playback = {...playback,id:'episode-'+ep,onlinestreamParams:{episodeNumber:ep,dubbed:dub}}; media={...media,id:mediaId}},
         emit:name => listeners.get(name)?.({}), handle:name => handlers.get(name)?.(),
-        flushTimers:() => {const fns=[...timers.values()]; timers.clear(); for(const fn of fns) fn()} };
+        flushTimers:(includeDeadlines=false) => {for(const [id,timer] of [...timers]) { if(!includeDeadlines && timer.ms>=6000) continue; timers.delete(id);timer.fn(); }} };
 }
 const response = text => ({ok:true,status:200,text:() => text,json:() => JSON.parse(text)});
 test('explicit season and episode mismatches are excluded even from single-file top-level attachments', () => {
@@ -443,12 +443,12 @@ const settle = async () => {for(let i=0;i<8;i++) await new Promise(r => setImmed
 function fastSource(calls, waitForEp5) {
     return async url => {
         calls.push(url);
-        if (url.includes('feed.animetosho.org/json?eid=')) {
+        if (url.includes('feed.animetosho.xyz/feed/json?eid=')) {
             const eid = Number(new URL(url).searchParams.get('eid'));
             if (eid === 271606 && waitForEp5) await waitForEp5;
             return response(JSON.stringify([{id:eid,title:'[Yameii] English Dub',status:'complete'}]));
         }
-        if (url.includes('show=torrent')) return response(JSON.stringify({title:'[Yameii] English Dub',files:[{attachments:[{id:Number(new URL(url).searchParams.get('id')),type:'subtitle',info:{codec:'ASS',lang:'eng',name:'English Signs'}}]}]}));
+        if (url.includes('show=torrent')) return response(JSON.stringify({title:'[Yameii] English Dub',files:[{attachments:[{id:Number(new URL(url).searchParams.get('id')),type:'subtitle',url:'https://fixture.test/storage/attach/signs.ass.xz',info:{codec:'ASS',lang:'eng',name:'English Signs'}}]}]}));
         if (url.includes('/storage/attach/')) return {ok:true,body:Uint8Array.from(Buffer.from(encoded,'base64'))};
         throw Error('Fast match should not contact slower fallback '+url);
     };
@@ -462,7 +462,7 @@ test('fast match uses one release and does not wait for Animeya or the alternate
     await h.hooks.runSearch();
     assert.equal(calls.length,3); assert.equal(h.injected.length,1);assert.equal(h.palette.opens,0);
     h.handle('seasubs-choose');assert.match(h.palette.items[0].label,/English Signs/);
-    assert.ok(calls.every(url => !url.includes('animeya') && !url.includes('.xyz')));
+    assert.ok(calls.every(url => !url.includes('animeya') && !url.includes('feed.animetosho.org') && !url.includes('nyaa.si')));
 });
 test('unverified captions still require explicit selection after search completes', async () => {
     const h=harness(),item={label:'Preview English',url:'',content:vtt(timingSample()),type:'vtt',language:'en',score:10,mode:'direct'};
@@ -551,4 +551,53 @@ test('live captured episode responses survive blocked VTT and inject the real 20
     const derived = h.hooks.deriveSignsSongsAss(full);
     assert.ok(derived.count > 0 && derived.count < 313);
     console.log('Live full ASS: 313 events; derived signs/song events:',derived.count);
+});
+
+test('Nyaa RSS decodes entities and rejects malformed, duplicate, wrong-episode and foreign IDs',()=>{
+ const h=harness(),hash='a'.repeat(40);
+ const item=(name,id=123,domain='nyaa.si')=>'<item><title>'+name+'</title><guid isPermaLink="true">https://'+domain+'/view/'+id+'</guid><nyaa:infoHash>'+hash+'</nyaa:infoHash></item>';
+ const rows=h.hooks.parseNyaaRss('<rss>'+item('Title &amp; Songs - 04')+item('Duplicate',123)+item('Wrong - 05',124)+item('Foreign',125,'fake.test')+'</rss>');
+ assert.equal(rows.length,1);assert.equal(rows[0].title,'Title & Songs - 04');
+ assert.equal(h.hooks.parseNyaaRss('<html>blocked</html>').length,0);
+});
+test('Nyaa batch lookup checks torrent identity and selects only the requested underscored episode',async()=>{
+ const hash='b'.repeat(40),calls=[];
+ const h=harness(async url=>{
+ calls.push(url);
+ if(url.includes('nyaa.si/?'))return response('<rss><item><title>Girlfriend, Girlfriend Season 2 [Dual Audio]</title><guid>https://nyaa.si/view/123</guid><nyaa:infoHash>'+hash+'</nyaa:infoHash></item></rss>');
+ if(url.includes('nyaa_id=123'))return response(JSON.stringify({nyaa_id:123,info_hash:hash,title:'Girlfriend, Girlfriend Season 2',files:[{filename:'Title_-_04_.mkv',attachments:[{type:'subtitle',id:1,url:'https://fixture.test/sign.ass',info:{language_code:'eng',format:'ASS'}}]},{filename:'Title_-_05_.mkv',attachments:[{type:'subtitle',id:2,url:'https://fixture.test/wrong.ass',info:{language_code:'eng',format:'ASS'}}]}]}));
+ if(url==='https://fixture.test/sign.ass')return response(timingAss(timingSample()));
+ throw Error('Unexpected '+url);
+ });
+ const result=await h.hooks.searchNyaa();assert.equal(result.length,1);assert.match(result[0].label,/Nyaa.*Generated Signs/);assert.equal(result[0].mode,'direct');
+ assert.equal(calls.length,3);assert.ok(!calls.some(url=>url.includes('wrong.ass')));
+ await h.hooks.searchNyaa();assert.equal(calls.length,3);
+});
+test('unlabeled sparse ASS companion is inferred by full-track text and timing, not generic styles',async()=>{
+ const h=harness();
+ const cues=Array.from({length:120},(_,i)=>({start:i*10,end:i*10+2,text:'caption '+i}));
+ const make=c=>timingAss(c).replace(/,Signs,/g,',Default,');
+ const label='Nyaa — Generate Signs & Songs — English ASS — release';
+ const items=await h.hooks.inspectTorrentChoices([{label,url:'full',content:make(cues),type:'ass',mode:'derive',score:100},{label,url:'signs',content:make(cues.filter((_,i)=>i%10===0)),type:'ass',mode:'derive',score:100}]);
+ assert.equal(items.length,1);assert.equal(items[0].url,'signs');assert.match(items[0].label,/content compared/);assert.equal(items[0].score,2100);
+ const truncated=await h.hooks.inspectTorrentChoices([{label,url:'full',content:make(cues),type:'ass',mode:'derive',score:100},{label,url:'partial',content:make(cues.slice(0,10)),type:'ass',mode:'derive',score:100}]);assert.equal(truncated.length,0);
+});
+test('source deadline ends a stuck fetch and ignores its late completion',async()=>{
+ let resolve;const h=harness(()=>new Promise(r=>{resolve=r}));const pending=h.hooks.sourceFetch('https://fixture.test/hung');
+ await Promise.resolve();h.flushTimers(true);await assert.rejects(pending,/timed out/);resolve(response('[]'));await settle();
+});
+test('failed feed is tried once per search and skipped on a repeated search during backoff',async()=>{
+ const calls=[],h=harness(async url=>{calls.push(url);throw Error('network unavailable')});
+ await h.hooks.searchAnimeTosho();const feeds=calls.filter(url=>url.includes('feed.animetosho')&&url.includes('eid='));assert.equal(feeds.length,2);
+ assert.equal(calls.filter(url=>url.includes('nyaa.si')).length,1);
+ const count=calls.length;await h.hooks.searchAnimeTosho();assert.ok(!calls.slice(count).some(url=>url.includes('feed.animetosho')||url.includes('nyaa.si')));
+});
+
+test('Nyaa rejects a lookup with the wrong torrent hash before reading attachments',async()=>{
+ const calls=[],h=harness(async url=>{calls.push(url);if(url.includes('nyaa.si/?'))return response('<rss><item><title>Girlfriend, Girlfriend Season 2</title><guid>https://nyaa.si/view/123</guid><nyaa:infoHash>'+ 'a'.repeat(40) +'</nyaa:infoHash></item></rss>');return response(JSON.stringify({nyaa_id:123,info_hash:'b'.repeat(40),files:[{filename:'Title_-_04_.mkv',attachments:[{type:'subtitle',url:'https://fixture.test/wrong.ass',info:{language_code:'eng',format:'ASS'}}]}]}));});
+ assert.equal((await h.hooks.searchNyaa()).length,0);assert.equal(calls.length,2);assert.ok(!calls.some(url=>url.includes('wrong.ass')));
+});
+test('episode change during Nyaa lookup discards its attachments',async()=>{
+ let finish;const hash='a'.repeat(40),calls=[],h=harness(async url=>{calls.push(url);if(url.includes('nyaa.si/?'))return response('<rss><item><title>Girlfriend, Girlfriend Season 2</title><guid>https://nyaa.si/view/123</guid><nyaa:infoHash>'+hash+'</nyaa:infoHash></item></rss>');return new Promise(resolve=>{finish=resolve});});
+ const pending=h.hooks.searchNyaa();await settle();h.change(5);h.hooks.syncFromVideoCore();finish(response(JSON.stringify({nyaa_id:123,info_hash:hash,files:[]})));assert.equal((await pending).length,0);assert.equal(h.injected.length,0);
 });

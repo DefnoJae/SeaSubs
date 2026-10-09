@@ -116,14 +116,14 @@ function init() {
             return { content: lines.join("\r\n"), matched: matches.length, adjusted }
         }
 
-        function cueStats(cues: VttCue[]): { count: number, seconds: number, span: number } {
+        function cueStats(cues: {start:number,end:number,text:string}[]): { count: number, seconds: number, span: number } {
             const sorted = cues.slice().sort((a, b) => a.start - b.start)
             let seconds = 0, end = 0
             for (const c of sorted) { seconds += Math.max(0, c.end - Math.max(end, c.start)); end = Math.max(end, c.end) }
             return { count: cues.length, seconds: Math.round(seconds), span: Math.round(end) }
         }
 
-        function inferDubCompanion(dub: VttCue[], full: VttCue[]): boolean {
+        function inferDubCompanion(dub: {start:number,end:number,text:string}[], full: {start:number,end:number,text:string}[]): boolean {
             const d = cueStats(dub), f = cueStats(full)
             // Sparsity alone also describes truncated dialogue. Require a substantial full
             // reference and matching text/timestamps spread across the episode.
@@ -147,7 +147,7 @@ function init() {
         const API_KEY = "{{apiKey}}"
         const PREFER_FORCED = String("{{preferForced}}") !== "false"
         const API = "https://api.opensubtitles.com/api/v1"
-        const UA = "SeaSubs v0.14.0"
+        const UA = "SeaSubs v0.15.0"
 
         let title = ""
         let episode = 0
@@ -437,6 +437,7 @@ function init() {
         }
 
         async function prepareTiming(item: AnimeToshoResult): Promise<AnimeToshoResult> {
+            if (item.score < 500 && item.mode === "direct") return item
             if (item.manualTiming) return item
             if (!item.content || item.mode === "derive") return item
             const key = playbackKey()
@@ -495,12 +496,100 @@ function init() {
                 const filename = String(file.filename || file.name || "").split(/[\\/]/).pop() || ""
                 if (!matchesRelease(filename)) continue
                 const match = filename.match(/(?:^|[^a-z0-9])S\d{1,2}[ ._-]*E(\d{1,3}(?:\.\d+)?)(?:v\d+)?(?=[\s[._-]|$)/i)
-                    || filename.match(/(?:\s-\s|\bEpisode\s+|\bE)(\d{1,3}(?:\.\d+)?)(?:v\d+)?(?=[\s[._-]|$)/i)
+                    || filename.match(/(?:[ _]-[ _]|\bEpisode\s+|\bE)(\d{1,3}(?:\.\d+)?)(?:v\d+)?(?=[\s[._-]|$)/i)
                 if (match && Number(match[1]) !== episode) continue
                 if (files.length > 1 && !match) continue
                 add(file?.attachments || [])
             }
             return out
+        }
+
+        const sourceBlocked: Record<string,number> = {}
+        // Native fetch can spend longer in connection setup than its request timeout.
+        // Bound the UI wait as well; settle late requests without changing search state.
+        function sourceFetch(url: string, seconds = 6): Promise<any> {
+            return new Promise((resolve,reject) => {
+                let done = false;
+                const cancel = ctx.setTimeout(() => { if (!done) { done=true; reject(new Error("Source timed out after " + seconds + "s")) } }, seconds*1000);
+                Promise.resolve().then(() => ctx.fetch(url,{timeout:seconds,noCloudflareBypass:true})).then(value => {
+                    if (!done) { done=true; cancel(); resolve(value) }
+                },error => { if (!done) { done=true; cancel(); reject(error) } });
+            });
+        }
+        function decodeXml(value: string): string {
+            return value.replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g,"$1").replace(/&#(x[0-9a-f]+|[0-9]+);/gi,(_,n) => {
+                const code = n[0].toLowerCase()==="x"?parseInt(n.slice(1),16):Number(n);
+                return code > 0 && code <= 0x10ffff ? String.fromCodePoint(code) : "";
+            }).replace(/&quot;/g,'"').replace(/&apos;/g,"'").replace(/&lt;/g,"<").replace(/&gt;/g,">").replace(/&amp;/g,"&");
+        }
+        function parseNyaaRss(xml: string): {id:number,title:string,hash:string}[] {
+            if (xml.length>1000000 || !/<rss\b/i.test(xml)) return [];
+            const out: {id:number,title:string,hash:string}[] = [], seen: Record<string,boolean> = {};
+            for (const item of xml.match(/<item\b[^>]*>[\s\S]*?<\/item>/gi) || []) {
+                const name=decodeXml(item.match(/<title>([\s\S]*?)<\/title>/i)?.[1] || "");
+                const id=Number(item.match(/<guid\b[^>]*>https:\/\/nyaa\.si\/view\/(\d+)<\/guid>/i)?.[1] || 0);
+                const hash=item.match(/<nyaa:infoHash>([0-9a-f]{40})<\/nyaa:infoHash>/i)?.[1]?.toLowerCase() || "";
+                const number=name.match(/(?:[ _]-[ _]|\bEpisode\s+)(\d{1,3})(?:\s*[-~]\s*(\d{1,3}))?(?=[\s[._(]|$)/i);
+                if (!id || !hash || !name || seen[String(id)] || !matchesRelease(name) || (number && (number[2] ? episode<Number(number[1]) || episode>Number(number[2]) : episode!==Number(number[1])))) continue;
+                seen[String(id)]=true;out.push({id,title:name,hash});
+            }
+            return out;
+        }
+        async function searchNyaa(): Promise<AnimeToshoResult[]> {
+            const key=playbackKey();
+            if (!title || !episode || sourceBlocked.nyaa > Date.now()) return [];
+            try {
+                const url="https://nyaa.si/?page=rss&c=1_2&f=0&q="+encodeURIComponent(title);
+                let rows:any[];
+                const saved=feedCache[url];
+                if(saved && Date.now()-saved.time<300000) rows=saved.rows;
+                else {
+                    const response=await sourceFetch(url);
+                    if(!response.ok) throw new Error("Nyaa HTTP "+response.status);
+                    rows=parseNyaaRss(response.text());feedCache[url]={time:Date.now(),rows};
+                }
+                if(key!==playbackKey()) return [];
+                const words=title.toLowerCase().replace(/[^a-z0-9]+/g," ").split(" ").filter(w=>w.length>2);
+                rows=rows.filter(row=>words.every(w=>row.title.toLowerCase().replace(/[^a-z0-9]+/g," ").split(" ").includes(w)))
+                    .sort((a,b)=>(/dual|multi.?audio|signs|songs/i.test(b.title)?1:0)-(/dual|multi.?audio|signs|songs/i.test(a.title)?1:0)).slice(0,10);
+                const results=await Promise.all(rows.map(async row=>{
+                    try {
+                        const detailUrl="https://feed.animetosho.xyz/json?show=torrent&nyaa_id="+row.id;
+                        let detail=feedCache[detailUrl]?.rows[0];
+                        if(!detail || Date.now()-feedCache[detailUrl].time>=300000){
+                            const response=await sourceFetch(detailUrl);if(!response.ok)return [];
+                            detail=response.json();feedCache[detailUrl]={time:Date.now(),rows:[detail]};
+                        }
+                        if(key!==playbackKey() || Number(detail?.nyaa_id)!==row.id || String(detail?.info_hash||"").toLowerCase()!==row.hash)return [];
+                        return torrentSubtitles(detail,row.title,"animetosho.xyz").map(item=>({...item,label:"Nyaa — "+item.label}));
+                    } catch (_) {return []}
+                }));
+                if(key!==playbackKey())return [];
+                const choices=results.reduce((out,list)=>out.concat(list),[] as AnimeToshoResult[]);
+                console.log("SeaSubs Nyaa attachments",{releases:rows.length,tracks:choices.length,episode});
+                while(Object.keys(feedCache).length>36) delete feedCache[Object.keys(feedCache)[0]];
+                return await inspectTorrentChoices(choices);
+            } catch(error) {
+                sourceBlocked.nyaa=Date.now()+60000;
+                console.log("SeaSubs Nyaa search failed",String(error));return [];
+            }
+        }
+        async function inspectTorrentChoices(items: AnimeToshoResult[]): Promise<AnimeToshoResult[]> {
+            const key=playbackKey();
+            const loaded=await Promise.all(items.slice(0,12).map(async item=>({...item,content:await readCandidate(item)})));
+            if(key!==playbackKey())return [];
+            const readable=loaded.filter(item=>!!item.content), out:AnimeToshoResult[]=[];
+            for(const item of readable){
+                if(item.mode==="direct"){out.push(inspectSignsRole(item,item.content));continue}
+                const derived=deriveSignsSongsAss(item.content);
+                if(derived.count) out.push({...item,mode:"direct",content:derived.content,score:2000,label:item.label.replace("Generate Signs & Songs","Generated Signs & Songs")+" ("+derived.count+" events)"});
+                else {
+                    const cues=timingCues(item.content);
+                    const companion=readable.some(other=>other.url!==item.url && other.label===item.label && inferDubCompanion(cues,timingCues(other.content)));
+                    if(companion)out.push({...item,mode:"direct",score:2100,label:item.label.replace("Generate Signs & Songs","Likely Signs & Songs (content compared)")});
+                }
+            }
+            return out.concat(items.filter(item=>!loaded.some(read=>read.url===item.url))).sort((a,b)=>b.score-a.score);
         }
 
         async function searchAnimeToshoHost(host: string, eid: number, expanded = false): Promise<AnimeToshoResult[]> {
@@ -515,8 +604,8 @@ function init() {
             const cachedFeed = feedCache[feedUrl]
             if (cachedFeed && Date.now() - cachedFeed.time < 300000) entries = cachedFeed.rows
             else {
-                const feed = await ctx.fetch(feedUrl, { timeout: 8 })
-                if (!feed.ok) return []
+                const feed = await sourceFetch(feedUrl)
+                if (!feed.ok) throw new Error("Feed HTTP " + feed.status)
                 entries = feed.json() as any[]
                 if (Array.isArray(entries)) {
                     feedCache[feedUrl] = { time: Date.now(), rows: entries }
@@ -540,7 +629,7 @@ function init() {
                     const detailUrl = detailBase + entry.id
                     const saved = feedCache[detailUrl]
                     if (saved && Date.now()-saved.time < 300000) return {torrent:saved.rows[0],entry}
-                    const r = await ctx.fetch(detailUrl, { timeout: 6 })
+                    const r = await sourceFetch(detailUrl)
                     if (!r.ok) return null
                     const torrent = r.json() as any
                     feedCache[detailUrl] = {time:Date.now(),rows:[torrent]}
@@ -548,11 +637,13 @@ function init() {
                     return { torrent, entry }
                 } catch (_) { return null }
             }))
+            return details.filter(Boolean).reduce((out, item) => out.concat(torrentSubtitles(item!.torrent,item!.entry.title,host)), [] as AnimeToshoResult[])
+        }
+
+        function torrentSubtitles(torrent: any, entryTitle: string, host: string): AnimeToshoResult[] {
             const out: AnimeToshoResult[] = []
-            for (const item of details) {
-                if (!item) continue
-                const torrent = item.torrent
-                const release = String(torrent?.title || torrent?.torrent_name || item.entry?.title || "")
+            {
+                const release = String(torrent?.title || torrent?.torrent_name || entryTitle || "")
                 for (const attach of collectSubtitleAttachments(torrent)) {
                     const info = attach?.info || {}
                     const lang = String(info.lang || info.language_code || info.language || "").toLowerCase()
@@ -597,10 +688,12 @@ function init() {
                 metadataSeason = Number(epMeta?.seasonNumber || 0)
                 metadataSeasonKey = seriesKey()
                 const eid = Number(epMeta?.anidbId || 0)
-                if (!eid) return []
+                if (!eid) return await searchNyaa()
                 const sources: AnimeToshoResult[][] = []
+                let nyaaSearched = false
                 // A fast working source should not wait for a slow alternate host.
-                for (const host of ["animetosho.org", "animetosho.xyz"]) {
+                for (const host of ["animetosho.xyz", "animetosho.org"]) {
+                    if (sourceBlocked[host] > Date.now()) continue;
                     for (const expanded of [false, true]) {
                         if (key !== playbackKey()) return []
                         try {
@@ -634,9 +727,18 @@ function init() {
                                 if (derived.count) return [{ ...item, mode: "direct", content: derived.content, score: 2000,
                                     label: item.label.replace(/^Generate Signs & Songs/, "Generated Signs & Songs") + " (" + derived.count + " events)" }]
                             }
-                        } catch (err) { console.log("SeaSubs AnimeTosho host failed", host, String(err)) }
+                        } catch (err) { sourceBlocked[host]=Date.now()+60000; console.log("SeaSubs AnimeTosho host failed", host, String(err)); break }
+                    }
+                    if (host === "animetosho.xyz") {
+                        nyaaSearched = true;
+                        const nyaa = await searchNyaa();
+                        if (key !== playbackKey()) return [];
+                        sources.push(nyaa);
+                        if (nyaa.some(item=>item.content && item.mode === "direct" && item.score>=500)) return sources.reduce((out,list)=>out.concat(list),[] as AnimeToshoResult[]);
                     }
                 }
+                if (!nyaaSearched) sources.push(await searchNyaa());
+                if (key !== playbackKey()) return [];
                 const seen: Record<string, boolean> = {}
                 const out: AnimeToshoResult[] = []
                 for (const list of sources) {

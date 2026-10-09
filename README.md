@@ -2,6 +2,14 @@
 
 Seanime plugin for external English Forced / Signs & Songs subtitles. Adds only subtitle tracks through VideoCore; preserves your current video provider, quality and audio.
 
+## v0.15.0 Nyaa batch discovery and bounded searches
+
+- Adds public Nyaa English-anime RSS discovery when the episode-indexed mirror has no usable signs. Resolves up to ten matching releases through AnimeTosho's Nyaa-ID lookup, checks torrent ID and info hash, and extracts only the current episode's English subtitle attachments. No torrent client, video download or provider/audio change.
+- Uses the working AnimeTosho mirror first. Feed/detail/RSS waits have an additional six-second UI deadline; a failed feed is not retried for the expanded pass and failed sources back off for one minute. Subtitle downloads and successful feeds remain cached. This bounds individual source waits, not the entire search.
+- Recognizes underscored batch filenames such as `Title_-_11_.mkv`. Unlabeled ASS companion tracks are compared against their full track using cue density, text, timestamps and episode coverage; sparsity alone cannot qualify. Dense unverified captions remain manual previews and skip unnecessary automatic timing comparison.
+- Validated against captured Nyaa/AnimeTosho responses for Ouran episode 11: a Cleo release has a 377-cue full ASS and a matching 46-cue signs companion, both using generic styles. The search selects the 46-cue file and bypasses the unavailable original host and Animeya. Timing against the user's currently playing encode still needs confirmation in Seanime.
+- Nyaa discovery still depends on extracted attachments: releases that have not been processed or have missing attachments cannot be loaded this way. Seanime may request permission for the newly added `nyaa.si` domain when updating.
+
 ## v0.14.0 source filtering, faster alternatives and sign alignment
 
 - Rejects explicit season/episode mismatches in release titles and single/batch filenames. Uses episode metadata's season when available, otherwise the title's explicit season or Season 1. Keeps matching episode ranges in batch releases.
