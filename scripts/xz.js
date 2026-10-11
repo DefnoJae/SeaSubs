@@ -1,7 +1,8 @@
 import { Buffer } from 'buffer';
 import { decodeLzma2 } from 'xz-compat/dist/esm/lzma/sync/Lzma2Decoder.js';
+import { crc64, sha256 } from './xz-checks.js';
 
-// Subtitle-only XZ reader: CRC32, LZMA2, at most 16 blocks, 2 MB output,
+// Subtitle-only XZ reader: CRC32/CRC64/SHA256, LZMA2, at most 16 blocks, 2 MB output,
 // 8 MB dictionary. Reject other filters/checks instead of guessing.
 const LIMIT = 2 * 1024 * 1024;
 function crc(b) {
@@ -13,10 +14,12 @@ function requireOk(ok, message) { if (!ok) throw new Error('XZ: ' + message); }
 export function decode(raw) {
     requireOk(raw && raw.length >= 32 && raw.length <= 2 * 1024 * 1024, 'input size');
     const b = Buffer.from(raw);
-    requireOk(b.slice(0, 6).toString('hex') === 'fd377a585a00' && b[6] === 0 && b[7] === 1, 'only CRC32 streams supported');
+    requireOk(b.slice(0, 6).toString('hex') === 'fd377a585a00', 'magic');
+    const checkId = b[7], checkSize = { 1: 4, 4: 8, 10: 32 }[checkId];
+    requireOk(b[6] === 0 && checkSize !== undefined, 'unsupported stream flags/check');
     requireOk(crc(b.slice(6, 8)) === b.readUInt32LE(8), 'header checksum');
     const footer = b.length - 12;
-    requireOk(b.slice(-2).toString() === 'YZ' && b[footer + 8] === 0 && b[footer + 9] === 1, 'footer');
+    requireOk(b.slice(-2).toString() === 'YZ' && b[footer + 8] === b[6] && b[footer + 9] === checkId, 'footer');
     requireOk(crc(b.slice(footer + 4, footer + 10)) === b.readUInt32LE(footer), 'footer checksum');
     const index = footer - (b.readUInt32LE(footer + 4) + 1) * 4;
     requireOk(index >= 12 && index < footer - 4 && b[index] === 0, 'index');
@@ -55,7 +58,7 @@ export function decode(raw) {
         requireOk(vli(end - 4) === 33 && vli(end - 4) === 1, 'LZMA2 filter');
         const property = b[pos++];
         requireOk(property <= 22 && pos <= end - 4 && b.slice(pos, end - 4).every(v => v === 0), 'dictionary/header limit');
-        const size = r.packed - hs - 4;
+        const size = r.packed - hs - checkSize;
         requireOk(size > 0 && (packedSize === null || packedSize === size) && (unpackedSize === null || unpackedSize === r.unpacked), 'sizes');
         const compressed = b.slice(end, end + size);
         // Validate framing before allocation; decoder's declared chunk sizes are untrusted.
@@ -76,9 +79,14 @@ export function decode(raw) {
             requireOk(outputSize <= r.unpacked && cp + pack <= compressed.length, 'chunk bounds'); cp += pack;
         }
         requireOk(outputSize === r.unpacked && compressed[compressed.length - 1] === 0, 'unpacked size');
-        const out = decodeLzma2(compressed, Buffer.from([property]), r.unpacked);
         const check = end + size + ((4 - ((hs + size) % 4)) % 4);
-        requireOk(out.length === r.unpacked && crc(out) === b.readUInt32LE(check), 'data checksum');
+        requireOk(check + checkSize === block + Math.ceil(r.packed / 4) * 4 && check + checkSize <= index, 'check bounds');
+        requireOk(b.slice(end + size, check).every(v => v === 0), 'block padding');
+        const out = decodeLzma2(compressed, Buffer.from([property]), r.unpacked);
+        requireOk(out.length === r.unpacked, 'unpacked size');
+        const valid = checkId === 1 ? crc(out) === b.readUInt32LE(check)
+            : Buffer.from(checkId === 4 ? crc64(out) : sha256(out)).equals(b.slice(check, check + checkSize));
+        requireOk(valid, 'data checksum');
         chunks.push(out); block += Math.ceil(r.packed / 4) * 4;
     }
     requireOk(block === index, 'block/index alignment');

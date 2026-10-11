@@ -372,6 +372,73 @@ test('decoder runs without Node/browser globals and verifies checksums', () => {
     assert.throws(() => hooks.SeaSubsXZ.decode(bytes.slice(0,35)));
     assert.equal(sandbox.Buffer,undefined); assert.equal(sandbox.require,undefined);
 });
+
+const xzFixture = name => fs.readFileSync(path.join(__dirname, 'fixtures', 'xz-' + name));
+function xzBlocks(bytes) {
+    const footer = bytes.length - 12;
+    const index = footer - (bytes.readUInt32LE(footer + 4) + 1) * 4;
+    let pos = index + 1;
+    const vli = () => { let n=0, shift=0, v; do { v=bytes[pos++]; n+=(v & 127)*2**shift; shift+=7; } while(v & 128); return n; };
+    const count = vli(), blocks = []; let start=12;
+    for(let i=0;i<count;i++) {
+        const packed=vli(); vli();
+        const end=start+Math.ceil(packed/4)*4;
+        const checkSize={1:4,4:8,10:32}[bytes[7]];
+        blocks.push({start,end,check:end-checkSize,checkSize,padding:Math.ceil(packed/4)*4-packed}); start=end;
+    }
+    return blocks;
+}
+for (const name of ['crc32','crc64','sha256']) {
+    test(name + ' fixtures validate every block and every integrity-check byte in the isolated UI VM', () => {
+        const {hooks,sandbox}=harness(), decode=hooks.SeaSubsXZ.decode;
+        assert.equal(sandbox.crypto,undefined); assert.equal(sandbox.require,undefined);
+        assert.equal(sandbox.Buffer,undefined);
+        for(const suffix of ['', '-multi']) {
+            const bytes=xzFixture(name+suffix+'.ass.xz');
+            assert.equal(decode(bytes),xzFixture('subtitle.ass').toString('utf8'));
+            for(const block of xzBlocks(bytes)) {
+                for(let i=0;i<block.checkSize;i++) {
+                    const bad=Buffer.from(bytes); bad[block.check+i]^=1;
+                    assert.throws(()=>decode(bad),/XZ: data checksum/);
+                }
+                if(block.padding) {
+                    const bad=Buffer.from(bytes); bad[block.check-1]=1;
+                    assert.throws(()=>decode(bad),/XZ: block padding/);
+                }
+            }
+            for(const position of [8, bytes.length-12, bytes.length-16, 12+((bytes[12]+1)*4)-4]) {
+                const bad=Buffer.from(bytes); bad[position]^=1;
+                assert.throws(()=>decode(bad),/XZ: .*checksum/);
+            }
+            assert.throws(()=>decode(bytes.subarray(0,bytes.length-1)),/XZ:/);
+        }
+    });
+    test(name + ' subtitle fetch deduplicates and caches verified plaintext; corrupted checks never inject', async () => {
+        const bytes=xzFixture(name+'.ass.xz'); let calls=0;
+        const h=harness(async()=>{calls++; return {ok:true,body:Uint8Array.from(bytes)};});
+        const item={label:'English Signs',url:'https://fixture.test/'+name+'.ass.xz',type:'ass',language:'en',mode:'direct',score:1000};
+        const texts=await Promise.all([h.hooks.readCandidate(item),h.hooks.readCandidate({...item})]);
+        assert.equal(texts[0],xzFixture('subtitle.ass').toString('utf8')); assert.equal(texts[1],texts[0]);
+        assert.equal(await h.hooks.readCandidate({...item}),texts[0]); assert.equal(calls,1);
+        await h.hooks.loadCandidate({...item,playback:h.hooks.playbackKey()}); assert.equal(h.injected.length,1); assert.equal(calls,1);
+        const bad=Buffer.from(bytes); bad[xzBlocks(bytes)[0].check]^=1;
+        let failures=0; const rejected=harness(async()=>{failures++;return {ok:true,body:Uint8Array.from(bad)};});
+        assert.equal(await rejected.hooks.readCandidate(item),'');
+        await rejected.hooks.loadCandidate({...item,playback:rejected.hooks.playbackKey()}); assert.equal(rejected.injected.length,0); assert.equal(failures,1);
+    });
+}
+test('XZ retains input, output, dictionary and block-count limits and rejects unknown or mismatched checks', () => {
+    const decode=harness().hooks.SeaSubsXZ.decode;
+    assert.throws(()=>decode(new Uint8Array(2*1024*1024+1)),/XZ: input size/);
+    for(const [name,error] of [['output-limit','output limit'],['dictionary-limit','dictionary\/header limit'],['block-limit','block count']])
+        assert.throws(()=>decode(xzFixture(name+'.xz')),new RegExp('XZ: '+error));
+    for(const id of [0,2,3,5,15,0x84]) {
+        const bad=Buffer.from(xzFixture('crc64.ass.xz'));bad[7]=id;
+        assert.throws(()=>decode(bad),/XZ: unsupported stream flags\/check/);
+    }
+    const bad=Buffer.from(xzFixture('crc64.ass.xz'));bad[bad.length-3]=1;
+    assert.throws(()=>decode(bad),/XZ: footer/);
+});
 test('VTT parser supports settings, identifiers and multiline text; ignores notes', () => {
     const {hooks:s} = harness();
     const text = '\uFEFFWEBVTT\n\nNOTE ignore --> text\n\ncue-id\n00:01.000 --> 00:03.000 align:start\nline 1\nline 2\n\n00:04.000 --> 00:03.000\nbad';
