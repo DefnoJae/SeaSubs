@@ -2,6 +2,12 @@
 
 Seanime plugin for external English Forced / Signs & Songs subtitles. Adds only subtitle tracks through VideoCore; preserves your current video provider, quality and audio.
 
+## v0.15.1 XZ subtitle integrity checks
+
+- Supports CRC64 and SHA256 XZ subtitle attachments with full integrity validation, alongside CRC32.
+- Preserves existing size limits and subtitle caching; rejects corrupt checks and invalid block padding.
+- Adds independent liblzma fixtures and regression tests. Build passed; 62 tests passed, with one existing live-fixture test skipped.
+
 ## v0.15.0 Nyaa batch discovery and bounded searches
 
 - Adds public Nyaa English-anime RSS discovery when the episode-indexed mirror has no usable signs. Resolves up to ten matching releases through AnimeTosho's Nyaa-ID lookup, checks torrent ID and info hash, and extracts only the current episode's English subtitle attachments. No torrent client, video download or provider/audio change.
