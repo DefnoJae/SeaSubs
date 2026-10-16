@@ -3,7 +3,8 @@ import { decodeLzma2 } from 'xz-compat/dist/esm/lzma/sync/Lzma2Decoder.js';
 import { crc64, sha256 } from './xz-checks.js';
 
 // Subtitle-only XZ reader: CRC32/CRC64/SHA256, LZMA2, at most 16 blocks, 2 MB output,
-// 8 MB dictionary. Reject other filters/checks instead of guessing.
+// At most 2 MB dictionary allocation, even for larger declared dictionaries.
+// Reject other filters/checks instead of guessing.
 const LIMIT = 2 * 1024 * 1024;
 function crc(b) {
     let n = 0xffffffff;
@@ -57,7 +58,8 @@ export function decode(raw) {
         const unpackedSize = flags & 128 ? vli(end - 4) : null;
         requireOk(vli(end - 4) === 33 && vli(end - 4) === 1, 'LZMA2 filter');
         const property = b[pos++];
-        requireOk(property <= 22 && pos <= end - 4 && b.slice(pos, end - 4).every(v => v === 0), 'dictionary/header limit');
+        requireOk(property <= 40, 'invalid dictionary property');
+        requireOk(pos <= end - 4 && b.slice(pos, end - 4).every(v => v === 0), 'block header padding');
         const size = r.packed - hs - checkSize;
         requireOk(size > 0 && (packedSize === null || packedSize === size) && (unpackedSize === null || unpackedSize === r.unpacked), 'sizes');
         const compressed = b.slice(end, end + size);
@@ -82,7 +84,13 @@ export function decode(raw) {
         const check = end + size + ((4 - ((hs + size) % 4)) % 4);
         requireOk(check + checkSize === block + Math.ceil(r.packed / 4) * 4 && check + checkSize <= index, 'check bounds');
         requireOk(b.slice(end + size, check).every(v => v === 0), 'block padding');
-        const out = decodeLzma2(compressed, Buffer.from([property]), r.unpacked);
+        // LZMA2 distances cannot refer past bytes already produced in this block.
+        // The checked Index and chunk framing bound that history to LIMIT, so a
+        // declared 64 MiB (or larger) dictionary needs no larger allocation here.
+        // Keep smaller declared dictionaries intact so their distance checks hold.
+        // Property 18 is 2 MiB. Cap before the dependency allocates its dictionary
+        // (its size parser also uses signed shifts for properties 38 and 39).
+        const out = decodeLzma2(compressed, Buffer.from([Math.min(property, 18)]), r.unpacked);
         requireOk(out.length === r.unpacked, 'unpacked size');
         const valid = checkId === 1 ? crc(out) === b.readUInt32LE(check)
             : Buffer.from(checkId === 4 ? crc64(out) : sha256(out)).equals(b.slice(check, check + checkSize));

@@ -47,9 +47,24 @@ def multi(parts, check):
     assert lzma.decompress(result) == b''.join(parts)
     return result
 
+def declared_dictionary(stream, prop):
+    # A larger history declaration does not change compressed data or distances.
+    # Update only the property and Block Header CRC, preserving all data checks.
+    data = bytearray(stream)
+    end = 12 + (data[12] + 1) * 4
+    data[16] = prop
+    data[end - 4:end] = crc(data[12:end - 4])
+    return bytes(data)
+
 for name, check in [('crc32', lzma.CHECK_CRC32), ('crc64', lzma.CHECK_CRC64), ('sha256', lzma.CHECK_SHA256)]:
     (root / ('xz-' + name + '.ass.xz')).write_bytes(lzma.compress(text, check=check, preset=6))
     (root / ('xz-' + name + '-multi.ass.xz')).write_bytes(multi([text[:53], text[53:]], check))
+    large = declared_dictionary(lzma.compress(text, check=check, preset=6), 28)
+    assert lzma.decompress(large, memlimit=128 * 1024 * 1024) == text
+    (root / ('xz-' + name + '-dict64.ass.xz')).write_bytes(large)
+    # Avoid asking liblzma to allocate 4 GiB during regeneration. The same
+    # compressed data remains valid with the maximum legal history declaration.
+    (root / ('xz-' + name + '-dictmax.ass.xz')).write_bytes(declared_dictionary(large, 40))
 (root / 'xz-output-limit.xz').write_bytes(lzma.compress(b'A' * (2 * 1024 * 1024 + 1), check=lzma.CHECK_CRC64))
-(root / 'xz-dictionary-limit.xz').write_bytes(lzma.compress(text, check=lzma.CHECK_SHA256, filters=[{'id': lzma.FILTER_LZMA2, 'dict_size': 16 * 1024 * 1024}]))
+(root / 'xz-dictionary-16m.xz').write_bytes(lzma.compress(text, check=lzma.CHECK_SHA256, filters=[{'id': lzma.FILTER_LZMA2, 'dict_size': 16 * 1024 * 1024}]))
 (root / 'xz-block-limit.xz').write_bytes(multi([text] * 17, lzma.CHECK_CRC64))

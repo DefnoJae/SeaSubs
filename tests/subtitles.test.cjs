@@ -6,7 +6,7 @@ const ts = require('typescript');
 const path = require('node:path');
 const root = path.resolve(__dirname, '..');
 const encoded = '/Td6WFoAAAFpIt42AgAhARYAAAB0L+Wj4AC2AJRdAC2UyMtHifLr5yTJxebCHSxfVkqNWXIPxgJIapMQKExT/N3Z7OVSi3s9v9hZrhfZR9YvoXRXW5inxLdC+ikFjefmBr0yuTyJ6GwfQEeYVLP8/aeVoeJLDN8QisM3Py8muktdEzfW4bM74QkR9bT1HFpprg0e/eEJGzWOqINlLHz2asmlOA9X/PqQltzB3gXOB81ygAAA1B/VhAABrAG3AQAA7DCMET4wDYsCAAAAAAFZWg==';
-function harness(fetch, storage = new Map()) {
+function harness(fetch, storage = new Map(), globals = {}) {
     const injected = [], messages = [], palette = {items: [], opens:0, visible:false, setItems(v) { this.items = v }, open() {this.opens++;this.visible=true}, close() {this.visible=false} };
     let playback = { id: 'episode-a', subtitleTracks: [], onlinestreamParams: { episodeNumber: 4, dubbed: true } };
     let media = {id:154692,title:{english:'Girlfriend, Girlfriend Season 2'}};
@@ -39,7 +39,7 @@ function harness(fetch, storage = new Map()) {
     vm.runInContext(ts.transpileModule(code, {compilerOptions:{target:ts.ScriptTarget.ES2018}}).outputText, rootSandbox);
     rootSandbox.init();
     // Seanime serializes the callback and evaluates it in a separate UI VM.
-    const sandbox = {console:{log() {}}, __ctx:ctx, $storage:{get:key => storage.get(key),set:(key,value) => storage.set(key,JSON.parse(JSON.stringify(value)))}}; vm.createContext(sandbox);
+    const sandbox = {...globals,console:{log() {}}, __ctx:ctx, $storage:{get:key => storage.get(key),set:(key,value) => storage.set(key,JSON.parse(JSON.stringify(value)))}}; vm.createContext(sandbox);
     vm.runInContext('(' + callback + ').call(undefined, __ctx)', sandbox);
     sandbox.testHooks.syncFromVideoCore();
     return { sandbox, hooks:sandbox.testHooks, palette, injected, messages, storage,
@@ -413,8 +413,8 @@ for (const name of ['crc32','crc64','sha256']) {
             assert.throws(()=>decode(bytes.subarray(0,bytes.length-1)),/XZ:/);
         }
     });
-    test(name + ' subtitle fetch deduplicates and caches verified plaintext; corrupted checks never inject', async () => {
-        const bytes=xzFixture(name+'.ass.xz'); let calls=0;
+    test(name + ' large-dictionary subtitle fetch caches verified plaintext; corrupted checks never inject', async () => {
+        const bytes=xzFixture(name+'-dict64.ass.xz'); let calls=0;
         const h=harness(async()=>{calls++; return {ok:true,body:Uint8Array.from(bytes)};});
         const item={label:'English Signs',url:'https://fixture.test/'+name+'.ass.xz',type:'ass',language:'en',mode:'direct',score:1000};
         const texts=await Promise.all([h.hooks.readCandidate(item),h.hooks.readCandidate({...item})]);
@@ -427,10 +427,10 @@ for (const name of ['crc32','crc64','sha256']) {
         await rejected.hooks.loadCandidate({...item,playback:rejected.hooks.playbackKey()}); assert.equal(rejected.injected.length,0); assert.equal(failures,1);
     });
 }
-test('XZ retains input, output, dictionary and block-count limits and rejects unknown or mismatched checks', () => {
+test('XZ retains input, output and block-count limits and rejects unknown or mismatched checks', () => {
     const decode=harness().hooks.SeaSubsXZ.decode;
     assert.throws(()=>decode(new Uint8Array(2*1024*1024+1)),/XZ: input size/);
-    for(const [name,error] of [['output-limit','output limit'],['dictionary-limit','dictionary\/header limit'],['block-limit','block count']])
+    for(const [name,error] of [['output-limit','output limit'],['block-limit','block count']])
         assert.throws(()=>decode(xzFixture(name+'.xz')),new RegExp('XZ: '+error));
     for(const id of [0,2,3,5,15,0x84]) {
         const bad=Buffer.from(xzFixture('crc64.ass.xz'));bad[7]=id;
@@ -438,6 +438,58 @@ test('XZ retains input, output, dictionary and block-count limits and rejects un
     }
     const bad=Buffer.from(xzFixture('crc64.ass.xz'));bad[bad.length-3]=1;
     assert.throws(()=>decode(bad),/XZ: footer/);
+});
+
+function xzHeaderProperty(bytes, property, padding = false) {
+    const changed=Buffer.from(bytes), end=12+(changed[12]+1)*4;
+    changed[padding ? 17 : 16]=property;
+    let crc=0xffffffff;
+    for(const v of changed.subarray(12,end-4)) { crc^=v;for(let i=0;i<8;i++)crc=(crc>>>1)^((crc&1)?0xedb88320:0); }
+    changed.writeUInt32LE((crc^0xffffffff)>>>0,end-4);
+    return changed;
+}
+test('large valid XZ dictionaries decode with bounded allocations and preserve integrity checks', () => {
+    const allocations=[];
+    const boundedArray=new Proxy(Uint8Array,{construct(target,args){
+        const size=typeof args[0]==='number'?args[0]:args[0]?.byteLength || args[0]?.length || 0;
+        assert.ok(size<=2*1024*1024+64,'unexpected allocation: '+size);
+        allocations.push(size);return Reflect.construct(target,args);
+    }});
+    const decode=harness(undefined,new Map(),{Uint8Array:boundedArray}).hooks.SeaSubsXZ.decode;
+    const expected=xzFixture('subtitle.ass').toString('utf8');
+    assert.equal(decode(xzFixture('dictionary-16m.xz')),expected);
+    for(const name of ['crc32','crc64','sha256']) {
+        for(const size of ['dict64','dictmax']) {
+            const bytes=xzFixture(name+'-'+size+'.ass.xz');
+            assert.equal(decode(bytes),expected);
+            for(const block of xzBlocks(bytes)) for(let i=0;i<block.checkSize;i++) {
+                const bad=Buffer.from(bytes);bad[block.check+i]^=1;
+                assert.throws(()=>decode(bad),/XZ: data checksum/);
+            }
+        }
+        // Exercise signed-shift edge cases in the dependency's dictionary parser.
+        for(const property of [0,20,22,24,28,37,38,39,40])
+            assert.equal(decode(xzHeaderProperty(xzFixture(name+'.ass.xz'),property)),expected);
+    }
+    assert.ok(allocations.includes(2*1024*1024));
+    for(const property of [41,63,64,128,255])
+        assert.throws(()=>decode(xzHeaderProperty(xzFixture('crc64.ass.xz'),property)),/XZ: invalid dictionary property/);
+    assert.throws(()=>decode(xzHeaderProperty(xzFixture('crc64-dict64.ass.xz'),1,true)),/XZ: block header padding/);
+    assert.throws(()=>decode(xzHeaderProperty(xzFixture('output-limit.xz'),28)),/XZ: output limit/);
+});
+
+test('captured Daemons Episode 5 large-dictionary attachments match liblzma and inject cached plaintext',
+    {skip: !process.env.SEASUBS_LIVE_XZ_DIR}, async () => {
+    const dir=process.env.SEASUBS_LIVE_XZ_DIR;
+    for(let i=0;i<4;i++) {
+        const bytes=fs.readFileSync(path.join(dir,'attachment-'+i+'.ass.xz'));
+        const expected=fs.readFileSync(path.join(dir,'attachment-'+i+'.ass'),'utf8');
+        let calls=0;const h=harness(async()=>{calls++;return {ok:true,body:Uint8Array.from(bytes)};});
+        assert.equal(bytes[16],28);assert.equal(h.hooks.SeaSubsXZ.decode(bytes),expected);
+        const item={label:'English Signs',url:'https://storage.animetosho.net/releases/test/track'+i+'.ass.xz',type:'ass',language:'en',mode:'direct',score:1000,playback:h.hooks.playbackKey()};
+        assert.equal(await h.hooks.readCandidate(item),expected.replace(/^\uFEFF/,''));
+        await h.hooks.loadCandidate(item);assert.equal(h.injected.length,1);assert.equal(calls,1);
+    }
 });
 test('VTT parser supports settings, identifiers and multiline text; ignores notes', () => {
     const {hooks:s} = harness();

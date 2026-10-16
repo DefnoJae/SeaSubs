@@ -2,6 +2,12 @@
 
 Seanime plugin for external English Forced / Signs & Songs subtitles. Adds only subtitle tracks through VideoCore; preserves your current video provider, quality and audio.
 
+## v0.15.2 Large declared XZ dictionaries
+
+- Accepts valid large dictionary declarations used by AnimeTosho attachments, including 64 MiB, while capping decoder dictionary allocation at 2 MiB using the validated output limit.
+- Preserves CRC32/CRC64/SHA256 validation, smaller dictionary distance checks, input/output limits and subtitle caching. Invalid dictionary properties and block header padding are rejected.
+- Reproduced the reported Episode 5 failure on all four attachments; the fixed decoder matches liblzma's decoded text byte for byte.
+
 ## v0.15.1 XZ subtitle integrity checks
 
 - Supports CRC64 and SHA256 XZ subtitle attachments with full integrity validation, alongside CRC32.
@@ -141,7 +147,7 @@ The original AnimeTosho API does expose a working alternate source: release `586
 
 ## Limits and validation
 
-Observed Vidnest subtitle CDN domains are explicitly allowed; rotations can require a manifest update. XZ support intentionally accepts CRC32/LZMA2 only: maximum 2 MiB compressed input, 2 MiB output, 8 MiB dictionary, 16 blocks. Unsupported/corrupt streams fail visibly. ASS custom fonts are not downloaded, so rendering may substitute fonts.
+Observed Vidnest subtitle CDN domains are explicitly allowed; rotations can require a manifest update. XZ support accepts CRC32/CRC64/SHA256 with LZMA2: maximum 2 MiB compressed input, 2 MiB output, 2 MiB dictionary allocation, 16 blocks. Larger valid dictionary declarations are supported with allocation bounded by the validated output limit. Unsupported/corrupt streams fail visibly. ASS custom fonts are not downloaded, so rendering may substitute fonts.
 
 Tested with live API/attachment data, fifteen regression/replay checks and mocked VideoCore injection, including search request counts, next-episode following, saved preferences, pause, cached revisits and rapid skips. The real attachment also decoded byte for byte inside Seanime's exact Goja version after callback serialization into a fresh UI VM; native `*string` subtitle URIs and empty tracks were tested there too. The user confirmed v0.6.1 renders successfully; v0.7.0's automatic episode following remains to be checked in the user's player.
 
