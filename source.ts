@@ -147,7 +147,7 @@ function init() {
         const API_KEY = "{{apiKey}}"
         const PREFER_FORCED = String("{{preferForced}}") !== "false"
         const API = "https://api.opensubtitles.com/api/v1"
-        const UA = "SeaSubs v0.15.2"
+        const UA = "SeaSubs v0.15.3"
 
         let title = ""
         let episode = 0
@@ -420,15 +420,28 @@ function init() {
             const tracks = ctx.videoCore.getCurrentPlaybackInfo()?.subtitleTracks || []
             const english = tracks.filter(t => !/^SeaSubs/.test(String(t.label || ""))
                 && (/^(en|eng|english)(?:[-_]|$)/i.test(String(t.language || "")) || /english|\beng\b/i.test(String(t.label || ""))))
-            const key = playbackKey() + "|" + english.map(t => String((t as any).uri || (t as any).src || (t as any).sourceUrl || (t as any).content || "")).join("|")
+            const targets = english.map(track => {
+                const raw = track as any
+                return { ...unwrapProviderUrl(String(raw.uri || raw.src || raw.sourceUrl || "")),
+                    content: raw.content == null ? "" : String(raw.content), type: String(raw.format || raw.type || "vtt") }
+            })
+            const key = playbackKey() + "|" + JSON.stringify(targets)
             if (key === timingReferenceKey && timingReference) return await timingReference
             timingReferenceKey = key
             timingReference = (async () => {
-                for (const track of english.slice(0, 2)) {
-                    const raw = track as any
-                    const target = unwrapProviderUrl(String(raw.uri || raw.src || raw.sourceUrl || ""))
+                const seen: Record<string, boolean> = {}
+                // Prefer inline/text references, but still probe image-looking URLs:
+                // some providers serve subtitle text under a .jpeg path.
+                const priority = (target: typeof targets[number]) => target.content ? 0 : /\.(?:ass|ssa|srt|vtt)(?:[?#]|$)/i.test(target.url) ? 1 : 2
+                const unique = targets.filter(target => {
+                    const id = JSON.stringify(target)
+                    if (seen[id]) return false
+                    seen[id] = true
+                    return !!(target.content || target.url)
+                }).sort((a,b) => priority(a) - priority(b)).slice(0, 6)
+                for (const target of unique) {
                     const content = await readCandidate({ label: "Provider timing reference", url: target.url,
-                        fetchHeaders: target.headers, fetchTimeout: 5, content: raw.content == null ? "" : String(raw.content), type: String(raw.format || raw.type || "vtt"), language: "en", score: 0, mode: "direct" })
+                        fetchHeaders: target.headers, fetchTimeout: 5, content: target.content, type: target.type, language: "en", score: 0, mode: "direct" })
                     if (timingCues(content).length >= 3) return content
                 }
                 return ""
