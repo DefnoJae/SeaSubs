@@ -356,6 +356,52 @@ test('blocked reference leaves content unchanged and labels timing unverified', 
     const result=await h.hooks.prepareTiming({label:'Signs',content,url:'',type:'ass',language:'en',score:1000,mode:'direct'});
     assert.equal(result.content,content); assert.equal(result.timingMatched,0); assert.match(result.label,/timing unverified/);
 });
+
+test('observed provider host is allowed exactly, without widening CDN permissions', () => {
+    const domains=JSON.parse(fs.readFileSync(path.join(root,'Manifest.json'),'utf8')).plugin.permissions.allow.networkAccess.allowedDomains;
+    assert.ok(domains.includes('mistcherry.starviolet.top'));
+    assert.ok(!domains.includes('*.starviolet.top'));
+    assert.ok(!domains.includes('*'));
+});
+
+test('image-looking provider URL can contain subtitle text and proxy headers stay restricted', async () => {
+    const calls=[],content=timingAss(timingSample()),remote='https://mistcherry.starviolet.top/a/reference.jpeg';
+    const proxy='http://localhost:43211/api/v1/proxy?url='+encodeURIComponent(remote)+'&headers='+encodeURIComponent(JSON.stringify({Referer:'https://vidnest.fun/',Cookie:'secret'}));
+    const h=harness(async (url,opts)=>{calls.push({url,opts});return response(vtt(timingSample()))});
+    h.setTracks([{label:'English',language:'en',uri:proxy}]);
+    const result=await h.hooks.prepareTiming({label:'Signs',content,url:'',type:'ass',language:'en',score:1000,mode:'direct'});
+    assert.ok(result.timingMatched>=3);assert.equal(calls[0].url,remote);
+    assert.equal(calls[0].opts.headers.Cookie,undefined);assert.equal(calls[0].opts.timeout,5);
+});
+
+test('provider references fall through blocked and real image responses to a later usable track', async () => {
+    const calls=[],content=timingAss(timingSample());
+    const h=harness(async url=>{calls.push(url);if(url.endsWith('/blocked'))throw Error('network access denied');
+        return response(url.endsWith('/image')?'\xff\xd8\xff\xe0JFIF':vtt(timingSample()))});
+    h.setTracks(['blocked','image','usable'].map(name=>({label:'English',language:'en',uri:'https://mistcherry.starviolet.top/'+name})));
+    const result=await h.hooks.prepareTiming({label:'Signs',content,url:'',type:'ass',language:'en',score:1000,mode:'direct'});
+    assert.equal(calls.length,3);assert.ok(result.timingMatched>=3);
+});
+
+test('reference attempts are unique, bounded, cached and keep timing when only images are available', async () => {
+    const calls=[],content=timingAss(timingSample());
+    const h=harness(async url=>{calls.push(url);return response('\xff\xd8\xff\xe0JFIF')});
+    const tracks=Array.from({length:10},(_,i)=>({label:'English',language:'en',uri:'https://mistcherry.starviolet.top/'+i+'.jpeg'}));
+    h.setTracks([tracks[0],...tracks]);
+    const item={label:'Signs',content,url:'',type:'ass',language:'en',score:1000,mode:'direct'};
+    const result=await h.hooks.prepareTiming(item);await h.hooks.prepareTiming(item);
+    assert.equal(calls.length,6);assert.equal(new Set(calls).size,6);
+    assert.equal(result.content,content);assert.equal(result.timingMatched,0);assert.match(result.label,/timing unverified/);
+});
+
+test('text references take priority over image-looking references and injected SeaSubs tracks', async () => {
+    const calls=[],h=harness(async url=>{calls.push(url);return response(vtt(timingSample()))});
+    h.setTracks([{label:'SeaSubs — English',language:'en',uri:'https://fixture.test/self.vtt'},
+        {label:'English',language:'en',uri:'https://mistcherry.starviolet.top/image.jpeg'},
+        {label:'English',language:'en',uri:'https://fixture.test/eng.vtt'}]);
+    await h.hooks.prepareTiming({label:'Signs',content:timingAss(timingSample()),url:'',type:'ass',language:'en',score:1000,mode:'direct'});
+    assert.deepEqual(calls,['https://fixture.test/eng.vtt']);
+});
 test('episode changes during timing fetch prevent stale subtitle injection', async () => {
     let release;const h=harness(()=>new Promise(resolve=>{release=resolve}));
     h.setTracks([{label:'English',language:'en',uri:'https://cdn.test/eng.vtt'}]);

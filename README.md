@@ -2,6 +2,12 @@
 
 Seanime plugin for external English Forced / Signs & Songs subtitles. Adds only subtitle tracks through VideoCore; preserves your current video provider, quality and audio.
 
+## v0.15.3 Provider timing reference fallback
+
+- Allows the observed provider subtitle host `mistcherry.starviolet.top` exactly; does not grant access to other `starviolet.top` hosts.
+- Prefers inline/text references and tries up to six distinct original English references instead of stopping after two. Image-looking URLs can serve subtitle text; actual images, denied requests and unreadable responses fall through to another reference. Existing proxy header filtering, download limits, timeouts and cue-match requirements remain in force.
+- If no readable reference is available, keeps the subtitle's original timing and labels it unverified. No timing is inferred from images. Updating may require Seanime to approve the added host; playback synchronization still needs confirmation in Seanime.
+
 ## v0.15.2 Large declared XZ dictionaries
 
 - Accepts valid large dictionary declarations used by AnimeTosho attachments, including 64 MiB, while capping decoder dictionary allocation at 2 MiB using the validated output limit.
