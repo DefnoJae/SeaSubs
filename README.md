@@ -2,6 +2,11 @@
 
 Seanime plugin for external English Forced / Signs & Songs subtitles. Adds only subtitle tracks through VideoCore; preserves your current video provider, quality and audio.
 
+## v0.15.4 Additional observed provider subtitle host
+
+- Allows exactly `creekpalm.cherrymossbrook.top`, seen in the Fairy Tail episode 42 log, for current-provider subtitle reads and timing references. Other hosts under that domain remain blocked.
+- Tests cover readable captions served at JPEG paths, actual images and HTTP 403 failures. Failed reads remain excluded without injecting broken URLs. The live URL returned HTTP 403 from the test environment, so adding permission does not guarantee CDN access or an available Signs & Songs track. The log also reports no Nyaa subtitle attachments and a DNS failure for the original AnimeTosho host.
+
 ## v0.15.3 Provider timing reference fallback
 
 - Allows the observed provider subtitle host `mistcherry.starviolet.top` exactly; does not grant access to other `starviolet.top` hosts.

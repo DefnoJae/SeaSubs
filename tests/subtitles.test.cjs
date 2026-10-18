@@ -360,8 +360,23 @@ test('blocked reference leaves content unchanged and labels timing unverified', 
 test('observed provider host is allowed exactly, without widening CDN permissions', () => {
     const domains=JSON.parse(fs.readFileSync(path.join(root,'Manifest.json'),'utf8')).plugin.permissions.allow.networkAccess.allowedDomains;
     assert.ok(domains.includes('mistcherry.starviolet.top'));
+    assert.ok(domains.includes('creekpalm.cherrymossbrook.top'));
+    assert.ok(!domains.includes('*.cherrymossbrook.top'));
     assert.ok(!domains.includes('*.starviolet.top'));
     assert.ok(!domains.includes('*'));
+});
+
+test('current provider accepts caption text on the observed JPEG path and excludes forbidden or image responses', async () => {
+    const url='https://creekpalm.cherrymossbrook.top/a/reference.jpeg';
+    for(const kind of ['text','image','forbidden']) {
+        const calls=[],h=harness(async target=>{calls.push(target);return kind==='forbidden'?{ok:false,status:403}:response(kind==='image'?'\xff\xd8\xff\xe0JFIF':vtt(timingSample()))});
+        h.setTracks([{label:'English (default)',language:'en',uri:url,format:'vtt'}]);
+        const items=await h.hooks.currentCandidates();
+        assert.deepEqual(calls,[url]);
+        if(kind==='text')assert.ok(items.some(item=>item.content.includes('WEBVTT')));
+        else assert.equal(items.length,0);
+        assert.equal(h.injected.length,0);
+    }
 });
 
 test('image-looking provider URL can contain subtitle text and proxy headers stay restricted', async () => {
